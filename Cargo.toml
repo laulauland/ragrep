@@ -1,5 +1,5 @@
 [package]
-name = "codebase-rag"
+name = "ragrep"
 version = "0.1.0"
 edition = "2021"
 

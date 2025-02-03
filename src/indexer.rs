@@ -14,6 +14,7 @@ impl Indexer {
                 ".git".to_string(),
                 ".ragrep".to_string(),
                 "target".to_string(),
+                "node_modules".to_string(),
             ],
             include_extensions: vec![
                 "rs".to_string(),
