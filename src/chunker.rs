@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use serde::Serialize;
 use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 use tree_sitter_javascript::language as js_language;
@@ -6,7 +7,7 @@ use tree_sitter_python::language as py_language;
 use tree_sitter_rust::language as rust_language;
 use tree_sitter_typescript::language_typescript as ts_language;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct CodeChunk {
     pub content: String,
     pub start_byte: usize,

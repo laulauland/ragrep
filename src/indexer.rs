@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct FileInfo {
     pub path: PathBuf,
     pub size: u64,

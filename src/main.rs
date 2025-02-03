@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fs;
 use std::path::PathBuf;
 
 mod chunker;
@@ -26,25 +29,39 @@ async fn main() -> Result<()> {
     let files = indexer.index_directory(&path)?;
     let mut chunker = chunker::Chunker::new()?;
     
+    #[derive(Serialize)]
+    struct FileChunks {
+        file_info: indexer::FileInfo,
+        chunks: Vec<chunker::CodeChunk>,
+    }
+
+    let mut all_chunks: HashMap<String, FileChunks> = HashMap::new();
+
     for file in files {
-        println!("\nProcessing: {}", file.path.display());
+        println!("Processing: {}", file.path.display());
         
-        // Read file content
         let content = std::fs::read_to_string(&file.path)
             .with_context(|| format!("Failed to read file: {}", file.path.display()))?;
             
-        // Chunk the file
         let chunks = chunker.chunk_file(&file.path, &content)?;
         
-        // Print chunks for debugging
-        for chunk in chunks {
-            println!("\n--- {} ---", chunk.kind);
-            if !chunk.leading_comments.is_empty() {
-                println!("Comments:\n{}", chunk.leading_comments);
-            }
-            println!("Content:\n{}", chunk.content);
+        if !chunks.is_empty() {
+            let path_str = file.path.to_string_lossy().to_string();
+            all_chunks.insert(path_str, FileChunks {
+                file_info: file,
+                chunks,
+            });
         }
     }
+
+    // Create output directory if it doesn't exist
+    fs::create_dir_all(".codebase_rag")?;
+    
+    // Write chunks to JSON file
+    let json = serde_json::to_string_pretty(&all_chunks)?;
+    fs::write(".codebase_rag/chunks.json", json)?;
+    
+    println!("\nChunks written to .codebase_rag/chunks.json");
 
     Ok(())
 }
