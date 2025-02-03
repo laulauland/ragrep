@@ -26,7 +26,10 @@ async fn main() -> Result<()> {
     let files = indexer.index_directory(&path)?;
     
     for file in files {
-        println!("Found: {}", file.display());
+        println!("Found: {} ({} bytes, modified: {:?})", 
+            file.path.display(), 
+            file.size,
+            file.modified);
     }
 
     Ok(())

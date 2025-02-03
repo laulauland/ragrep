@@ -1,6 +1,14 @@
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+#[derive(Debug)]
+pub struct FileInfo {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: SystemTime,
+}
 
 pub struct Indexer {
     include_extensions: Vec<String>,
@@ -18,7 +26,7 @@ impl Indexer {
         }
     }
 
-    pub fn index_directory(&self, path: &Path) -> Result<Vec<PathBuf>> {
+    pub fn index_directory(&self, path: &Path) -> Result<Vec<FileInfo>> {
         let base_path = path.canonicalize()
             .with_context(|| format!("Failed to canonicalize base path: {}", path.display()))?;
         let mut files = Vec::new();
@@ -37,7 +45,15 @@ impl Indexer {
             if entry.file_type().map_or(false, |ft| ft.is_file()) && self.is_valid_extension(entry.path()) {
                 let canonical_path = entry.path().canonicalize()
                     .with_context(|| format!("Failed to canonicalize path: {}", entry.path().display()))?;
-                files.push(canonical_path);
+                
+                let metadata = canonical_path.metadata()
+                    .with_context(|| format!("Failed to get metadata for: {}", canonical_path.display()))?;
+
+                files.push(FileInfo {
+                    path: canonical_path,
+                    size: metadata.len(),
+                    modified: metadata.modified()?,
+                });
             }
         }
 
