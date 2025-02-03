@@ -22,10 +22,10 @@ impl Chunker {
 
         // Initialize supported languages with their file extensions
         let languages = vec![
-            (tree_sitter_rust::language(), vec!["rs".to_string()]),
-            (tree_sitter_python::language(), vec!["py".to_string()]),
-            (tree_sitter_javascript::language(), vec!["js".to_string()]),
-            (tree_sitter_typescript::language(), vec!["ts".to_string()]),
+            (rust_language(), vec!["rs".to_string()]),
+            (py_language(), vec!["py".to_string()]),
+            (js_language(), vec!["js".to_string()]),
+            (tree_sitter_typescript::language_typescript(), vec!["ts".to_string()]),
         ];
 
         Ok(Self { parser, languages })
