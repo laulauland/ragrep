@@ -1,6 +1,6 @@
 use anyhow::Result;
-use walkdir::WalkDir;
 use std::path::Path;
+use walkdir::WalkDir;
 
 pub struct Indexer {
     exclude_dirs: Vec<String>,
@@ -10,14 +10,23 @@ pub struct Indexer {
 impl Indexer {
     pub fn new() -> Self {
         Self {
-            exclude_dirs: vec![".git".to_string(), ".codebase_rag".to_string(), "target".to_string()],
-            include_extensions: vec!["rs".to_string(), "py".to_string(), "js".to_string()],
+            exclude_dirs: vec![
+                ".git".to_string(),
+                ".ragrep".to_string(),
+                "target".to_string(),
+            ],
+            include_extensions: vec![
+                "rs".to_string(),
+                "py".to_string(),
+                "js".to_string(),
+                "ts".to_string(),
+            ],
         }
     }
 
     pub fn index_directory(&self, path: &Path) -> Result<Vec<String>> {
         let mut files = Vec::new();
-        
+
         for entry in WalkDir::new(path)
             .follow_links(true)
             .into_iter()
@@ -30,7 +39,7 @@ impl Indexer {
                 }
             }
         }
-        
+
         Ok(files)
     }
 
@@ -45,7 +54,11 @@ impl Indexer {
     fn is_valid_extension(&self, path: &Path) -> bool {
         path.extension()
             .and_then(|ext| ext.to_str())
-            .map(|ext| self.include_extensions.iter().any(|valid_ext| valid_ext == ext))
+            .map(|ext| {
+                self.include_extensions
+                    .iter()
+                    .any(|valid_ext| valid_ext == ext)
+            })
             .unwrap_or(false)
     }
 }

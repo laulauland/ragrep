@@ -1,11 +1,12 @@
-use clap::Parser;
 use anyhow::Result;
+use clap::Parser;
+use std::path::{Path, PathBuf};
 
-mod indexer;
 mod cleaner;
 mod embedder;
-mod store;
+mod indexer;
 mod query;
+mod store;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -18,6 +19,13 @@ struct Cli {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    println!("Indexing codebase at: {}", cli.path);
+    let path = PathBuf::from(cli.path);
+
+    let indexer = indexer::Indexer::new();
+
+    let files = indexer.index_directory(&path)?;
+
+    dbg!(files);
+
     Ok(())
 }
