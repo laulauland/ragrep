@@ -42,7 +42,7 @@ struct FileChunks {
 
 async fn index_codebase(path: PathBuf) -> Result<()> {
     println!("Indexing codebase at: {}", path.display());
-    
+
     let indexer = indexer::Indexer::new();
     let mut chunker = chunker::Chunker::new()?;
     let files = indexer.index_directory(&path)?;
