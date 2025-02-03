@@ -1,21 +1,14 @@
 use anyhow::{Context, Result};
+use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
-use walkdir::WalkDir;
 
 pub struct Indexer {
-    exclude_dirs: Vec<String>,
     include_extensions: Vec<String>,
 }
 
 impl Indexer {
     pub fn new() -> Self {
         Self {
-            exclude_dirs: vec![
-                ".git".to_string(),
-                ".ragrep".to_string(),
-                "target".to_string(),
-                "node_modules".to_string(),
-            ],
             include_extensions: vec![
                 "rs".to_string(),
                 "py".to_string(),
@@ -30,13 +23,18 @@ impl Indexer {
             .with_context(|| format!("Failed to canonicalize base path: {}", path.display()))?;
         let mut files = Vec::new();
 
-        for entry in WalkDir::new(&base_path)
+        let walker = WalkBuilder::new(&base_path)
+            .hidden(false) // Include hidden files/dirs
+            .git_ignore(true) // Use .gitignore
+            .git_global(true) // Use global gitignore
+            .git_exclude(true) // Use .git/info/exclude
+            .require_git(false) // Don't require git repo
             .follow_links(true)
-            .into_iter()
-            .filter_entry(|e| !self.should_exclude(e))
-        {
-            let entry = entry.with_context(|| "Failed to read directory entry")?;
-            if entry.file_type().is_file() && self.is_valid_extension(entry.path()) {
+            .build();
+
+        for result in walker {
+            let entry = result.with_context(|| "Failed to read directory entry")?;
+            if entry.file_type().map_or(false, |ft| ft.is_file()) && self.is_valid_extension(entry.path()) {
                 let canonical_path = entry.path().canonicalize()
                     .with_context(|| format!("Failed to canonicalize path: {}", entry.path().display()))?;
                 files.push(canonical_path);
@@ -44,14 +42,6 @@ impl Indexer {
         }
 
         Ok(files)
-    }
-
-    fn should_exclude(&self, entry: &walkdir::DirEntry) -> bool {
-        if let Some(file_name) = entry.file_name().to_str() {
-            self.exclude_dirs.iter().any(|dir| file_name == dir)
-        } else {
-            false
-        }
     }
 
     fn is_valid_extension(&self, path: &Path) -> bool {
