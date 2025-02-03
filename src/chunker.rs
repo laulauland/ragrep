@@ -57,6 +57,12 @@ impl Chunker {
         let mut chunks = Vec::new();
         let mut start_token = 0;
 
+        // Extract any inline comments from the content
+        let mut inline_comments = String::new();
+        if let Some(comment_start) = content.find("//") {
+            inline_comments = content[comment_start..].lines().next().unwrap_or("").to_string();
+        }
+
         while start_token < tokens.len() {
             let end_token = (start_token + self.max_chunk_size).min(tokens.len());
             let sub_content = tokens[start_token..end_token].join(" ");
@@ -70,16 +76,21 @@ impl Chunker {
                 chunk.end_byte
             };
 
+            // Combine leading comments with any inline comments
+            let mut combined_comments = chunk.leading_comments.clone();
+            if !inline_comments.is_empty() {
+                if !combined_comments.is_empty() {
+                    combined_comments.push('\n');
+                }
+                combined_comments.push_str(&inline_comments);
+            }
+
             chunks.push(CodeChunk {
                 content: sub_content,
                 start_byte,
                 end_byte,
                 kind: chunk.kind.clone(),
-                leading_comments: if start_token == 0 { 
-                    chunk.leading_comments.clone() 
-                } else { 
-                    String::new() 
-                },
+                leading_comments: combined_comments,  // Include comments in all chunks
                 parent_name: Some(format!("{} (part {})", chunk.kind, chunks.len() + 1)),
             });
 
@@ -159,12 +170,31 @@ impl Chunker {
                 let chunk_content = &content[range.clone()];
                 let kind = query.capture_names()[capture.index as usize].to_string();
 
+                // Extract any block comments within the chunk content
+                let mut chunk_comments = current_comments.clone();
+                let mut in_chunk_comments = String::new();
+                
+                // Look for block comments within the chunk
+                if let Some(comment_start) = chunk_content.find("/*") {
+                    if let Some(comment_end) = chunk_content[comment_start..].find("*/") {
+                        in_chunk_comments = chunk_content[comment_start..comment_start + comment_end + 2].to_string();
+                    }
+                }
+
+                // Combine all comments
+                if !in_chunk_comments.is_empty() {
+                    if !chunk_comments.is_empty() {
+                        chunk_comments.push('\n');
+                    }
+                    chunk_comments.push_str(&in_chunk_comments);
+                }
+
                 let chunk = CodeChunk {
                     content: chunk_content.to_string(),
                     start_byte: range.start,
                     end_byte: range.end,
                     kind,
-                    leading_comments: current_comments.clone(),
+                    leading_comments: chunk_comments,
                     parent_name: None,
                 };
 
