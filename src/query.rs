@@ -10,7 +10,7 @@ impl QueryEngine {
         Self { pool }
     }
 
-    pub async fn search(&self, query: &str) -> Result<Vec<(String, f32)>> {
+    pub async fn search(&self, _query: &str) -> Result<Vec<(String, f32)>> {
         // TODO: Implement similarity search
         Ok(vec![])
     }

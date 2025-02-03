@@ -13,7 +13,7 @@ impl Embedder {
         Self { api_key }
     }
 
-    pub async fn embed_text(&self, text: &str) -> Result<Embedding> {
+    pub async fn embed_text(&self, _text: &str) -> Result<Embedding> {
         // TODO: Implement actual embedding generation
         // For now, return a dummy embedding
         Ok(Embedding(vec![0.0; 384]))
