@@ -1,5 +1,5 @@
-use anyhow::Result;
-use std::path::Path;
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 pub struct Indexer {
@@ -24,19 +24,21 @@ impl Indexer {
         }
     }
 
-    pub fn index_directory(&self, path: &Path) -> Result<Vec<String>> {
+    pub fn index_directory(&self, path: &Path) -> Result<Vec<PathBuf>> {
+        let base_path = path.canonicalize()
+            .with_context(|| format!("Failed to canonicalize base path: {}", path.display()))?;
         let mut files = Vec::new();
 
-        for entry in WalkDir::new(path)
+        for entry in WalkDir::new(&base_path)
             .follow_links(true)
             .into_iter()
             .filter_entry(|e| !self.should_exclude(e))
         {
-            let entry = entry?;
+            let entry = entry.with_context(|| "Failed to read directory entry")?;
             if entry.file_type().is_file() && self.is_valid_extension(entry.path()) {
-                if let Some(path_str) = entry.path().to_str() {
-                    files.push(path_str.to_string());
-                }
+                let canonical_path = entry.path().canonicalize()
+                    .with_context(|| format!("Failed to canonicalize path: {}", entry.path().display()))?;
+                files.push(canonical_path);
             }
         }
 

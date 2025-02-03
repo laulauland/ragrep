@@ -24,8 +24,10 @@ async fn main() -> Result<()> {
     let indexer = indexer::Indexer::new();
 
     let files = indexer.index_directory(&path)?;
-
-    dbg!(files);
+    
+    for file in files {
+        println!("Found: {}", file.display());
+    }
 
     Ok(())
 }
