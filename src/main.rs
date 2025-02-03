@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::env;
 use std::fs;
 use std::path::PathBuf;
 
@@ -14,27 +15,37 @@ mod store;
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    /// Directory path to index
-    #[arg(short, long)]
-    path: String,
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let cli = Cli::parse();
-    let path = PathBuf::from(cli.path);
+#[derive(Subcommand)]
+enum Commands {
+    /// Index the current directory or specified path
+    Index {
+        /// Directory path to index (defaults to current directory)
+        #[arg(short, long)]
+        path: Option<String>,
+    },
+    /// Query the indexed codebase (default command)
+    Query {
+        /// Search query
+        query: String,
+    },
+}
 
+#[derive(Serialize)]
+struct FileChunks {
+    file_info: indexer::FileInfo,
+    chunks: Vec<chunker::CodeChunk>,
+}
+
+async fn index_codebase(path: PathBuf) -> Result<()> {
+    println!("Indexing codebase at: {}", path.display());
+    
     let indexer = indexer::Indexer::new();
-
-    let files = indexer.index_directory(&path)?;
     let mut chunker = chunker::Chunker::new()?;
-
-    #[derive(Serialize)]
-    struct FileChunks {
-        file_info: indexer::FileInfo,
-        chunks: Vec<chunker::CodeChunk>,
-    }
-
+    let files = indexer.index_directory(&path)?;
     let mut all_chunks: HashMap<String, FileChunks> = HashMap::new();
 
     for file in files {
@@ -65,6 +76,38 @@ async fn main() -> Result<()> {
     fs::write(".ragrep/chunks.json", json)?;
 
     println!("\nChunks written to .ragrep/chunks.json");
+    Ok(())
+}
+
+async fn query_codebase(query: String) -> Result<()> {
+    println!("Searching for: {}", query);
+    // TODO: Implement actual query functionality
+    println!("Query mode not yet implemented");
+    Ok(())
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    match cli.command {
+        Some(Commands::Index { path }) => {
+            let index_path = path
+                .map(PathBuf::from)
+                .unwrap_or_else(|| env::current_dir().expect("Failed to get current directory"));
+            index_codebase(index_path).await?;
+        }
+        Some(Commands::Query { query }) => {
+            query_codebase(query).await?;
+        }
+        None => {
+            // Default to query mode if no subcommand is provided
+            println!("No command specified. Use --help to see available commands.");
+            println!("Example usage:");
+            println!("  Index: ragrep index [--path <dir>]");
+            println!("  Query: ragrep query <search-term>");
+        }
+    }
 
     Ok(())
 }
