@@ -131,6 +131,8 @@ impl Chunker {
                 (struct_item) @struct
                 (impl_item) @impl
                 (trait_item) @trait
+                (use_declaration) @import
+                (mod_item) @module
                 (comment) @comment
             "#
             }
@@ -138,6 +140,8 @@ impl Chunker {
                 r#"
                 (function_definition) @function
                 (class_definition) @class
+                (import_statement) @import
+                (import_from_statement) @import
                 (comment) @comment
             "#
             }
@@ -146,6 +150,8 @@ impl Chunker {
                 (function_declaration) @function
                 (class_declaration) @class
                 (method_definition) @method
+                (import_statement) @import
+                (export_statement) @export
                 (comment) @comment
             "#
             }
