@@ -1,16 +1,20 @@
-use anyhow::{Context, Result};
+use anyhow::{Context as AnyhowContext, Result};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 mod chunker;
+mod context;
 mod embedder;
 mod indexer;
 mod query;
 mod store;
+
+use context::AppContext;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -40,7 +44,7 @@ struct FileChunks {
     chunks: Vec<chunker::CodeChunk>,
 }
 
-async fn index_codebase(path: PathBuf) -> Result<()> {
+async fn index_codebase(ctx: Arc<AppContext>, path: PathBuf) -> Result<()> {
     println!("Indexing codebase at: {}", path.display());
 
     let indexer = indexer::Indexer::new();
@@ -79,7 +83,7 @@ async fn index_codebase(path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn query_codebase(query: String) -> Result<()> {
+async fn query_codebase(ctx: Arc<AppContext>, query: String) -> Result<()> {
     println!("Searching for: {}", query);
     // TODO: Implement actual query functionality
     println!("Query mode not yet implemented");
@@ -89,16 +93,17 @@ async fn query_codebase(query: String) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let context = Arc::new(AppContext::new()?);
 
     match cli.command {
         Some(Commands::Index { path }) => {
             let index_path = path
                 .map(PathBuf::from)
                 .unwrap_or_else(|| env::current_dir().expect("Failed to get current directory"));
-            index_codebase(index_path).await?;
+            index_codebase(Arc::clone(&context), index_path).await?;
         }
         Some(Commands::Query { query }) => {
-            query_codebase(query).await?;
+            query_codebase(Arc::clone(&context), query).await?;
         }
         None => {
             // Default to query mode if no subcommand is provided
