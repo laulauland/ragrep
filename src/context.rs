@@ -1,15 +1,40 @@
-use std::sync::Arc;
-use anyhow::Result;
+use crate::config::ConfigManager;
+use crate::db::Database;
 use crate::embedder::Embedder;
+use anyhow::{Context as AnyhowContext, Result};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 pub struct AppContext {
-    pub embedder: Arc<Embedder>,
+    pub embedder: Embedder,
+    pub db: Database,
+    pub ragrep_dir: PathBuf,
+    pub config_manager: ConfigManager,
 }
 
 impl AppContext {
-    pub fn new() -> Result<Self> {
+    pub async fn new(base_path: &Path) -> Result<Self> {
+        let config_manager = ConfigManager::new(Some(base_path))?;
+
+        // Create .ragrep directory if it doesn't exist
+        let ragrep_dir = base_path.join(".ragrep");
+        fs::create_dir_all(&ragrep_dir)?;
+
+        // Initialize database
+        let db_path = ragrep_dir.join("ragrep.db");
+        let db = Database::new(&db_path)
+            .with_context(|| format!("Failed to initialize database at {}", db_path.display()))?;
+
+        // Initialize embedder with configured model cache directory
+        let model_cache_dir = config_manager.get_model_cache_dir()?;
+        fs::create_dir_all(&model_cache_dir)?;
+        println!("Using model cache directory: {}", model_cache_dir.display());
+
         Ok(Self {
-            embedder: Arc::new(Embedder::new()?),
+            embedder: Embedder::new(&model_cache_dir)?,
+            db,
+            ragrep_dir,
+            config_manager,
         })
     }
 }

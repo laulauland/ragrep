@@ -1,11 +1,13 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 use tree_sitter_javascript::language as js_language;
 use tree_sitter_python::language as py_language;
 use tree_sitter_rust::language as rust_language;
-use tree_sitter_typescript::language_typescript as ts_language;
 
 #[derive(Debug, Serialize)]
 pub struct CodeChunk {
@@ -17,6 +19,15 @@ pub struct CodeChunk {
     pub parent_name: Option<String>, // Name of original function/class if this is a sub-chunk
 }
 
+impl CodeChunk {
+    fn hash(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        self.content.hash(&mut hasher);
+        self.kind.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
 pub struct Chunker {
     parser: Parser,
     languages: Vec<(Language, Vec<String>)>,
@@ -26,20 +37,23 @@ pub struct Chunker {
 
 impl Chunker {
     pub fn new() -> Result<Self> {
-        let mut parser = Parser::new();
+        let parser = Parser::new();
 
         // Initialize supported languages with their file extensions
         let languages = vec![
             (rust_language(), vec!["rs".to_string()]),
             (py_language(), vec!["py".to_string()]),
             (js_language(), vec!["js".to_string()]),
-            (tree_sitter_typescript::language_typescript(), vec!["ts".to_string()]),
+            (
+                tree_sitter_typescript::language_typescript(),
+                vec!["ts".to_string()],
+            ),
         ];
 
-        Ok(Self { 
+        Ok(Self {
             parser,
             languages,
-            max_chunk_size: 1000, // Maximum tokens per chunk
+            max_chunk_size: 1000,   // Maximum tokens per chunk
             overlap_percentage: 15, // 15% overlap between chunks
         })
     }
@@ -47,7 +61,7 @@ impl Chunker {
     fn split_large_chunk(&self, chunk: CodeChunk) -> Vec<CodeChunk> {
         let content = chunk.content.as_str();
         let tokens: Vec<&str> = content.split_whitespace().collect();
-        
+
         if tokens.len() <= self.max_chunk_size {
             return vec![chunk];
         }
@@ -60,18 +74,24 @@ impl Chunker {
         // Extract any inline comments from the content
         let mut inline_comments = String::new();
         if let Some(comment_start) = content.find("//") {
-            inline_comments = content[comment_start..].lines().next().unwrap_or("").to_string();
+            inline_comments = content[comment_start..]
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_string();
         }
 
         while start_token < tokens.len() {
             let end_token = (start_token + self.max_chunk_size).min(tokens.len());
             let sub_content = tokens[start_token..end_token].join(" ");
-            
+
             // Calculate byte offsets for the sub-chunk
-            let start_byte = chunk.start_byte + content[..content.find(tokens[start_token]).unwrap_or(0)].len();
+            let start_byte =
+                chunk.start_byte + content[..content.find(tokens[start_token]).unwrap_or(0)].len();
             let end_byte = if end_token < tokens.len() {
-                chunk.start_byte + content[..content.find(tokens[end_token-1]).unwrap_or(0)].len() 
-                    + tokens[end_token-1].len()
+                chunk.start_byte
+                    + content[..content.find(tokens[end_token - 1]).unwrap_or(0)].len()
+                    + tokens[end_token - 1].len()
             } else {
                 chunk.end_byte
             };
@@ -90,7 +110,7 @@ impl Chunker {
                 start_byte,
                 end_byte,
                 kind: chunk.kind.clone(),
-                leading_comments: combined_comments,  // Include comments in all chunks
+                leading_comments: combined_comments, // Include comments in all chunks
                 parent_name: Some(format!("{} (part {})", chunk.kind, chunks.len() + 1)),
             });
 
@@ -123,37 +143,27 @@ impl Chunker {
             .parse(content, None)
             .with_context(|| "Failed to parse file")?;
 
-        // Language-specific queries to extract meaningful chunks
         let query_str = match ext.as_str() {
             "rs" => {
                 r#"
-                (function_item) @function
-                (struct_item) @struct
-                (impl_item) @impl
-                (trait_item) @trait
-                (use_declaration) @import
-                (mod_item) @module
-                (comment) @comment
-            "#
+                ((comment)* @comment
+                 [(function_item) @function
+                  (impl_item) @impl
+                  (trait_item) @trait])
+                "#
             }
             "py" => {
                 r#"
-                (function_definition) @function
-                (class_definition) @class
-                (import_statement) @import
-                (import_from_statement) @import
-                (comment) @comment
-            "#
+                ((comment)* @comment
+                 (function_definition) @function)
+                "#
             }
             "js" | "ts" => {
                 r#"
-                (function_declaration) @function
-                (class_declaration) @class
-                (method_definition) @method
-                (import_statement) @import
-                (export_statement) @export
-                (comment) @comment
-            "#
+                ((comment)* @comment
+                 [(function_declaration) @function
+                  (method_definition) @function])
+                "#
             }
             _ => return Ok(vec![]),
         };
@@ -161,57 +171,40 @@ impl Chunker {
         let query = Query::new(*language, query_str)?;
         let mut cursor = QueryCursor::new();
         let mut chunks = Vec::new();
-        let mut current_comments = String::new();
+        let mut seen_hashes = HashSet::new();
 
         for match_ in cursor.matches(&query, tree.root_node(), content.as_bytes()) {
+            let mut comments = String::new();
+            let mut chunk_content = String::new();
+
             for capture in match_.captures {
+                let capture_text = &content[capture.node.byte_range()];
+
                 if query.capture_names()[capture.index as usize] == "comment" {
-                    let comment_text = &content[capture.node.byte_range()];
-                    current_comments.push_str(comment_text);
-                    current_comments.push('\n');
-                    continue;
+                    comments.push_str(capture_text);
+                    comments.push('\n');
+                } else {
+                    chunk_content = capture_text.to_string();
                 }
+            }
 
-                let range = capture.node.byte_range();
-                let chunk_content = &content[range.clone()];
-                let kind = query.capture_names()[capture.index as usize].to_string();
-
-                // Extract any block comments within the chunk content
-                let mut chunk_comments = current_comments.clone();
-                let mut in_chunk_comments = String::new();
-                
-                // Look for block comments within the chunk
-                if let Some(comment_start) = chunk_content.find("/*") {
-                    if let Some(comment_end) = chunk_content[comment_start..].find("*/") {
-                        in_chunk_comments = chunk_content[comment_start..comment_start + comment_end + 2].to_string();
-                    }
-                }
-
-                // Combine all comments
-                if !in_chunk_comments.is_empty() {
-                    if !chunk_comments.is_empty() {
-                        chunk_comments.push('\n');
-                    }
-                    chunk_comments.push_str(&in_chunk_comments);
-                }
-
+            if !chunk_content.is_empty() {
                 let chunk = CodeChunk {
-                    content: chunk_content.to_string(),
-                    start_byte: range.start,
-                    end_byte: range.end,
-                    kind,
-                    leading_comments: chunk_comments,
+                    content: chunk_content,
+                    start_byte: match_.captures[0].node.start_byte(),
+                    end_byte: match_.captures[0].node.end_byte(),
+                    kind: query.capture_names()[match_.captures[0].index as usize].to_string(),
+                    leading_comments: comments,
                     parent_name: None,
                 };
 
-                // Split large chunks and add all resulting sub-chunks
-                chunks.extend(self.split_large_chunk(chunk));
-
-                current_comments.clear();
+                let hash = chunk.hash();
+                if seen_hashes.insert(hash) {
+                    chunks.push(chunk);
+                }
             }
         }
 
-        // Sort chunks by their position in the file
         chunks.sort_by_key(|chunk| chunk.start_byte);
         Ok(chunks)
     }
