@@ -19,6 +19,7 @@ A semantic code search tool that uses embeddings to find similar code snippets a
 ## Installation
 
 ```bash
+# Not actually live yet - still need to publish it 
 cargo install ragrep
 ```
 
