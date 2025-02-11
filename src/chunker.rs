@@ -150,7 +150,7 @@ impl Chunker {
         let query_str = match ext.as_str() {
             "rs" => {
                 r#"
-                ((comment)* @comment
+                ([(line_comment)* (block_comment)*] @comment
                  [(function_item) @function
                   (impl_item) @impl
                   (trait_item) @trait])
