@@ -1,5 +1,7 @@
 use anyhow::{Error, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use ignore::Walk;
+use promkit::preset::confirm::Confirm;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tree_sitter::{Parser, Query, QueryCursor};
@@ -12,9 +14,30 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    pub fn new(cache_dir: &Path) -> Result<Self, Error> {
-        let mut options = InitOptions::default().with_cache_dir(cache_dir.to_path_buf());
+    fn model_exists(model_cache_dir: &Path) -> bool {
+        Walk::new(model_cache_dir)
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.path().extension().map_or(false, |ext| ext == "onnx"))
+    }
+
+    pub fn new(model_cache_dir: &Path) -> Result<Self, Error> {
+        let mut options = InitOptions::default().with_cache_dir(model_cache_dir.to_path_buf());
         options.model_name = EmbeddingModel::ModernBertEmbedLarge;
+
+        if !Self::model_exists(model_cache_dir) {
+            let size_mb = 1500; // Approximate size of the model
+            let message = format!(
+                "The embedding model (~{}MB) needs to be downloaded. This is a one-time operation.",
+                size_mb
+            );
+
+            let mut prompt = Confirm::new(&message).prompt()?;
+            let response = prompt.run()?;
+
+            if response == "n" || response == "N" || response == "no" || response == "No" {
+                return Err(Error::msg("Model download cancelled by user"));
+            }
+        }
 
         let model = TextEmbedding::try_new(options)?;
         Ok(Self { model })

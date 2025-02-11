@@ -62,8 +62,8 @@ impl Database {
         chunk_index: i32,
         node_type: &str,
         node_name: Option<&str>,
-        start_line: i32,
-        end_line: i32,
+        start_line: usize,
+        end_line: usize,
         text: &str,
         embedding: &[f32],
     ) -> Result<()> {
@@ -71,7 +71,6 @@ impl Database {
         let tx = self.conn.transaction()?;
 
         // Insert metadata into the chunks table.
-        // NOTE: Adjusted the placeholder count to 7.
         tx.execute(
             r#"
             INSERT INTO chunks (
@@ -84,8 +83,8 @@ impl Database {
                 chunk_index,
                 node_type,
                 node_name,
-                start_line,
-                end_line,
+                start_line as i32,
+                end_line as i32,
                 text,
             ),
         )?;
@@ -105,7 +104,7 @@ impl Database {
 
     pub fn find_similar_chunks(
         &self,
-        embedding: &[f32],
+        query_embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(String, String, i32, i32, String, f32)>> {
         let mut stmt = self.conn.prepare(
@@ -118,19 +117,19 @@ impl Database {
             "#,
         )?;
 
-        let results = stmt
-            .query_map(params![embedding.as_bytes(), limit], |row| {
+        let chunks = stmt
+            .query_map(params![query_embedding.as_bytes(), limit], |row| {
                 Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
+                    row.get(0)?, // text
+                    row.get(1)?, // file_path
+                    row.get(2)?, // start_line
+                    row.get(3)?, // end_line
+                    row.get(4)?, // node_type
+                    row.get(5)?, // distance
                 ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(results)
+        Ok(chunks)
     }
 }

@@ -2,6 +2,7 @@ use crate::config::ConfigManager;
 use crate::db::Database;
 use crate::embedder::Embedder;
 use anyhow::{Context as AnyhowContext, Result};
+use log::debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -28,7 +29,7 @@ impl AppContext {
         // Initialize embedder with configured model cache directory
         let model_cache_dir = config_manager.get_model_cache_dir()?;
         fs::create_dir_all(&model_cache_dir)?;
-        println!("Using model cache directory: {}", model_cache_dir.display());
+        debug!("Using model cache directory: {}", model_cache_dir.display());
 
         Ok(Self {
             embedder: Embedder::new(&model_cache_dir)?,
