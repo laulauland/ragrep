@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use log::debug;
 use serde::Serialize;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -22,7 +23,7 @@ pub struct CodeChunk {
 }
 
 impl CodeChunk {
-    fn hash(&self) -> u64 {
+    pub fn hash(&self) -> u64 {
         let mut hasher = DefaultHasher::new();
         self.content.hash(&mut hasher);
         self.kind.hash(&mut hasher);
@@ -229,6 +230,13 @@ impl Chunker {
                 let hash = chunk.hash();
                 if seen_hashes.insert(hash) {
                     chunks.push(chunk);
+                } else {
+                    debug!(
+                        "Duplicate chunk detected for file {} at lines {}-{}",
+                        path.display(),
+                        start_line,
+                        end_line
+                    );
                 }
             }
         }

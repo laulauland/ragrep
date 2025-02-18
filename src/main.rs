@@ -117,6 +117,7 @@ async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
                     chunk.start_line,
                     chunk.end_line,
                     &chunk.content,
+                    chunk.hash(),
                     &embedding,
                 )?;
 

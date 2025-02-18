@@ -36,7 +36,9 @@ impl Database {
                 start_line INTEGER NOT NULL,
                 end_line INTEGER NOT NULL,
                 text TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                hash INTEGER NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(file_path, start_line, end_line, hash)
             );
 
             CREATE INDEX IF NOT EXISTS idx_file_path ON chunks(file_path);
@@ -65,18 +67,19 @@ impl Database {
         start_line: usize,
         end_line: usize,
         text: &str,
+        chunk_hash: u64,
         embedding: &[f32],
     ) -> Result<()> {
         // Start a transaction to ensure both inserts succeed or fail together.
         let tx = self.conn.transaction()?;
 
         // Insert metadata into the chunks table.
-        tx.execute(
+        let rows = tx.execute(
             r#"
-            INSERT INTO chunks (
+            INSERT OR IGNORE INTO chunks (
                 file_path, chunk_index, node_type, node_name,
-                start_line, end_line, text
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                start_line, end_line, text, hash
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             (
                 file_path,
@@ -86,17 +89,21 @@ impl Database {
                 start_line as i32,
                 end_line as i32,
                 text,
+                chunk_hash as i64,
             ),
         )?;
 
-        // Use last_insert_rowid safely within the same transaction.
-        tx.execute(
-            r#"
-            INSERT INTO chunks_vec (rowid, embedding) 
-            VALUES (last_insert_rowid(), ?1)
-            "#,
-            (embedding.as_bytes(),),
-        )?;
+        // Insert into chunks_vec only if a new row was added.
+        if rows > 0 {
+            let last_row_id = tx.last_insert_rowid();
+            tx.execute(
+                r#"
+                INSERT OR IGNORE INTO chunks_vec (rowid, embedding) 
+                VALUES (?1, ?2)
+                "#,
+                (last_row_id, embedding.as_bytes()),
+            )?;
+        }
 
         tx.commit()?;
         Ok(())

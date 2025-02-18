@@ -28,7 +28,8 @@ impl Indexer {
     }
 
     pub fn index_directory(&self, path: &Path) -> Result<Vec<FileInfo>> {
-        let base_path = path.canonicalize()
+        let base_path = path
+            .canonicalize()
             .with_context(|| format!("Failed to canonicalize base path: {}", path.display()))?;
         let mut files = Vec::new();
 
@@ -43,13 +44,40 @@ impl Indexer {
 
         for result in walker {
             let entry = result.with_context(|| "Failed to read directory entry")?;
-            if entry.file_type().map_or(false, |ft| ft.is_file()) && self.is_valid_extension(entry.path()) {
-                let canonical_path = entry.path().canonicalize()
-                    .with_context(|| format!("Failed to canonicalize path: {}", entry.path().display()))?;
-                
-                let metadata = canonical_path.metadata()
-                    .with_context(|| format!("Failed to get metadata for: {}", canonical_path.display()))?;
+            if entry.file_type().map_or(false, |ft| ft.is_file())
+                && self.is_valid_extension(entry.path())
+            {
+                let canonical_path = entry.path().canonicalize().with_context(|| {
+                    format!("Failed to canonicalize path: {}", entry.path().display())
+                })?;
 
+                let metadata = canonical_path.metadata().with_context(|| {
+                    format!("Failed to get metadata for: {}", canonical_path.display())
+                })?;
+
+                files.push(FileInfo {
+                    path: canonical_path,
+                    size: metadata.len(),
+                    modified: metadata.modified()?,
+                });
+            }
+        }
+
+        Ok(files)
+    }
+
+    // New method for partial indexing given a list of file paths.
+    pub fn index_files<I: IntoIterator<Item = PathBuf>>(&self, paths: I) -> Result<Vec<FileInfo>> {
+        let mut files = Vec::new();
+
+        for path in paths {
+            if self.is_valid_extension(&path) {
+                let canonical_path = path
+                    .canonicalize()
+                    .with_context(|| format!("Failed to canonicalize path: {}", path.display()))?;
+                let metadata = canonical_path.metadata().with_context(|| {
+                    format!("Failed to get metadata for: {}", canonical_path.display())
+                })?;
                 files.push(FileInfo {
                     path: canonical_path,
                     size: metadata.len(),

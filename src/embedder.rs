@@ -3,14 +3,17 @@ use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use ignore::Walk;
 use promkit::preset::confirm::Confirm;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Embedding(pub Vec<f32>);
 
 pub struct Embedder {
     model: TextEmbedding,
+    cache: Mutex<HashMap<u64, Embedding>>,
 }
 
 impl Embedder {
@@ -40,13 +43,37 @@ impl Embedder {
         }
 
         let model = TextEmbedding::try_new(options)?;
-        Ok(Self { model })
+        Ok(Self {
+            model,
+            cache: Mutex::new(HashMap::new()),
+        })
     }
 
     pub async fn embed_text(&self, text: &str, file_path: &str) -> Result<Embedding> {
+        use std::hash::{Hash, Hasher};
+
         let processed = self.preprocess_code(text, file_path);
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        processed.hash(&mut hasher);
+        let text_hash = hasher.finish();
+
+        {
+            let cache = self.cache.lock().unwrap();
+            if let Some(cached) = cache.get(&text_hash) {
+                return Ok(cached.clone());
+            }
+        }
+
         let embeddings = self.model.embed(vec![&processed], None)?;
-        Ok(Embedding(embeddings[0].clone()))
+        let embedding_result = Embedding(embeddings[0].clone());
+
+        {
+            let mut cache = self.cache.lock().unwrap();
+            cache.insert(text_hash, embedding_result.clone());
+        }
+
+        Ok(embedding_result)
     }
 
     pub async fn embed_query(&self, query: &str) -> Result<Embedding> {
