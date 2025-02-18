@@ -3,6 +3,10 @@ name = "ragrep"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "rag"
+path = "src/main.rs"
+
 [dependencies]
 ignore = "0.4"
 tree-sitter = "0.20"
@@ -18,8 +22,7 @@ serde_json = "1.0"
 anyhow = "1.0"
 clap = { version = "4.4", features = ["derive"] }
 directories = "5.0"
-# fastembed = "4.4.0"
-fastembed = { path = "../../keturiosakys/fastembed-rs" }
+fastembed = "4.5.0"
 dirs = "6.0.0"
 toml = "0.8.20"
 sqlite-vec = "0.1.6"
@@ -30,3 +33,4 @@ termcolor = "1.4.1"
 env_logger = "0.11.6"
 indicatif = "0.17.11"
 indicatif-log-bridge = "0.2.3"
+git2 = "0.20.0"
