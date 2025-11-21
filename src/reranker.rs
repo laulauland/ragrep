@@ -11,7 +11,9 @@ pub struct Reranker {
 impl Reranker {
     pub fn new(model_cache_dir: &Path) -> Result<Self, Error> {
         debug!("Initializing reranker model...");
-        let options = RerankInitOptions::new(RerankerModel::BGERerankerV2M3)
+        // Using Jina Reranker v2 - 278M params, 71.36 MRR@10 on CodeSearchNet
+        // 15x faster than BGE, 2x larger context (1024 tokens), trained for code search
+        let options = RerankInitOptions::new(RerankerModel::JINARerankerV2BaseMultiligual)
             .with_cache_dir(model_cache_dir.to_path_buf())
             .with_show_download_progress(true);
 
