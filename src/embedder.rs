@@ -6,13 +6,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
-use tree_sitter::{Parser, Query, QueryCursor};
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Language, Parser, Query, QueryCursor};
+use tree_sitter_javascript::LANGUAGE as JS_LANGUAGE;
+use tree_sitter_python::LANGUAGE as PYTHON_LANGUAGE;
+use tree_sitter_rust::LANGUAGE as RUST_LANGUAGE;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Embedding(pub Vec<f32>);
 
 pub struct Embedder {
-    model: TextEmbedding,
+    model: Mutex<TextEmbedding>,
     cache: Mutex<HashMap<u64, Embedding>>,
 }
 
@@ -25,10 +29,11 @@ impl Embedder {
 
     pub fn new(model_cache_dir: &Path) -> Result<Self, Error> {
         let mut options = InitOptions::default().with_cache_dir(model_cache_dir.to_path_buf());
-        options.model_name = EmbeddingModel::ModernBertEmbedLarge;
+        // Using mixedbread-ai/mxbai-embed-large-v1 - 1024 dimensions, MTEB score 64.68
+        options.model_name = EmbeddingModel::MxbaiEmbedLargeV1;
 
         if !Self::model_exists(model_cache_dir) {
-            let size_mb = 1500; // Approximate size of the model
+            let size_mb = 600; // Approximate size of the model
             let message = format!(
                 "The embedding model (~{}MB) needs to be downloaded. This is a one-time operation.",
                 size_mb
@@ -44,7 +49,7 @@ impl Embedder {
 
         let model = TextEmbedding::try_new(options)?;
         Ok(Self {
-            model,
+            model: Mutex::new(model),
             cache: Mutex::new(HashMap::new()),
         })
     }
@@ -65,7 +70,8 @@ impl Embedder {
             }
         }
 
-        let embeddings = self.model.embed(vec![&processed], None)?;
+        let mut model = self.model.lock().unwrap();
+        let embeddings = model.embed(vec![&processed], None)?;
         let embedding_result = Embedding(embeddings[0].clone());
 
         {
@@ -77,7 +83,8 @@ impl Embedder {
     }
 
     pub async fn embed_query(&self, query: &str) -> Result<Embedding> {
-        let embeddings = self.model.embed(vec![query], None)?;
+        let mut model = self.model.lock().unwrap();
+        let embeddings = model.embed(vec![query], None)?;
         Ok(Embedding(embeddings[0].clone()))
     }
 
@@ -85,18 +92,19 @@ impl Embedder {
         let mut parser = Parser::new();
 
         // Detect language from file extension
-        let language = match Path::new(file_path)
+        let ext = Path::new(file_path)
             .extension()
-            .and_then(|ext| ext.to_str())
-        {
-            Some("rs") => tree_sitter_rust::language(),
-            Some("py") => tree_sitter_python::language(),
-            Some("js" | "ts") => tree_sitter_javascript::language(),
-            _ => tree_sitter_javascript::language(), // default
+            .and_then(|ext| ext.to_str());
+
+        let language: Language = match ext {
+            Some("rs") => RUST_LANGUAGE.into(),
+            Some("py") => PYTHON_LANGUAGE.into(),
+            Some("js" | "ts") => JS_LANGUAGE.into(),
+            _ => JS_LANGUAGE.into(), // default
         };
 
         parser
-            .set_language(language)
+            .set_language(&language)
             .expect("Failed to set language");
 
         let tree = match parser.parse(text, None) {
@@ -104,7 +112,7 @@ impl Embedder {
             None => return format!("FILE: {} {}", file_path, text),
         };
 
-        let query_str = if language == tree_sitter_rust::language() {
+        let query_str = if ext == Some("rs") {
             r#"
             (function_item 
                 name: (identifier) @name
@@ -120,7 +128,7 @@ impl Embedder {
                 name: (identifier) @trait_name
             ) @trait
             "#
-        } else if language == tree_sitter_python::language() {
+        } else if ext == Some("py") {
             r#"
             (function_definition
                 name: (identifier) @name
@@ -154,7 +162,7 @@ impl Embedder {
             "#
         };
 
-        let query = match Query::new(language, query_str) {
+        let query = match Query::new(&language, query_str) {
             Ok(q) => q,
             Err(_) => return format!("FILE: {} {}", file_path, text),
         };
@@ -162,12 +170,13 @@ impl Embedder {
         let mut cursor = QueryCursor::new();
         let mut processed = text.to_string();
 
-        for match_ in cursor.matches(&query, tree.root_node(), text.as_bytes()) {
+        let mut query_matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+        while let Some(match_) = query_matches.next() {
             for capture in match_.captures {
                 let range = capture.node.byte_range();
                 let capture_name = &query.capture_names()[capture.index as usize];
 
-                let prefix = match capture_name.as_str() {
+                let prefix = match capture_name.as_ref() {
                     "function" | "method" => "FUNCTION ",
                     "class" => "CLASS ",
                     "impl" => "IMPLEMENTATION ",

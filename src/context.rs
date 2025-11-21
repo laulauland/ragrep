@@ -1,6 +1,7 @@
 use crate::config::ConfigManager;
 use crate::db::Database;
 use crate::embedder::Embedder;
+use crate::reranker::Reranker;
 use anyhow::{Context as AnyhowContext, Result};
 use log::debug;
 use std::fs;
@@ -8,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 pub struct AppContext {
     pub embedder: Embedder,
+    pub reranker: Reranker,
     pub db: Database,
     pub ragrep_dir: PathBuf,
     pub config_manager: ConfigManager,
@@ -33,6 +35,7 @@ impl AppContext {
 
         Ok(Self {
             embedder: Embedder::new(&model_cache_dir)?,
+            reranker: Reranker::new(&model_cache_dir)?,
             db,
             ragrep_dir,
             config_manager,

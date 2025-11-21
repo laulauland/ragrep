@@ -2,7 +2,7 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use sqlite_vec::sqlite3_vec_init;
 use std::path::Path;
-use zerocopy::AsBytes;
+use zerocopy::IntoBytes;
 
 pub struct Database {
     conn: Connection,

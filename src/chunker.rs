@@ -5,10 +5,12 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
+use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
-use tree_sitter_javascript::language as js_language;
-use tree_sitter_python::language as py_language;
-use tree_sitter_rust::language as rust_language;
+use tree_sitter_javascript::LANGUAGE as JS_LANGUAGE;
+use tree_sitter_python::LANGUAGE as PYTHON_LANGUAGE;
+use tree_sitter_rust::LANGUAGE as RUST_LANGUAGE;
+use tree_sitter_typescript::LANGUAGE_TYPESCRIPT as TS_LANGUAGE;
 
 #[derive(Debug, Serialize)]
 pub struct CodeChunk {
@@ -33,7 +35,6 @@ impl CodeChunk {
 
 pub struct Chunker {
     parser: Parser,
-    languages: Vec<(Language, Vec<String>)>,
     // max_chunk_size: usize,
     // overlap_percentage: usize,
 }
@@ -42,20 +43,8 @@ impl Chunker {
     pub fn new() -> Result<Self> {
         let parser = Parser::new();
 
-        // Initialize supported languages with their file extensions
-        let languages = vec![
-            (rust_language(), vec!["rs".to_string()]),
-            (py_language(), vec!["py".to_string()]),
-            (js_language(), vec!["js".to_string()]),
-            (
-                tree_sitter_typescript::language_typescript(),
-                vec!["ts".to_string()],
-            ),
-        ];
-
         Ok(Self {
             parser,
-            languages,
             // max_chunk_size: 1000,   // Maximum tokens per chunk
             // overlap_percentage: 15, // 15% overlap between chunks
         })
@@ -132,23 +121,23 @@ impl Chunker {
         let ext = path
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or("");
 
-        let language = self
-            .languages
-            .iter()
-            .find(|(_, exts)| exts.contains(&ext))
-            .map(|(lang, _)| lang)
-            .with_context(|| format!("Unsupported file extension: {}", ext))?;
+        let language: Language = match ext {
+            "rs" => RUST_LANGUAGE.into(),
+            "py" => PYTHON_LANGUAGE.into(),
+            "ts" => TS_LANGUAGE.into(),
+            "js" => JS_LANGUAGE.into(),
+            _ => return Err(anyhow::anyhow!("Unsupported file extension: {}", ext)),
+        };
 
-        self.parser.set_language(*language)?;
+        self.parser.set_language(&language)?;
         let tree = self
             .parser
             .parse(content, None)
             .with_context(|| "Failed to parse file")?;
 
-        let query_str = match ext.as_str() {
+        let query_str = match ext {
             "rs" => {
                 r#"
                 ([(line_comment)* (block_comment)*] @comment
@@ -173,7 +162,7 @@ impl Chunker {
             _ => return Ok(vec![]),
         };
 
-        let query = Query::new(*language, query_str)?;
+        let query = Query::new(&language, query_str)?;
         let mut cursor = QueryCursor::new();
         let mut chunks = Vec::new();
         let mut seen_hashes = HashSet::new();
@@ -185,7 +174,8 @@ impl Chunker {
             .chain(std::iter::once(content.len()))
             .collect();
 
-        for match_ in cursor.matches(&query, tree.root_node(), content.as_bytes()) {
+        let mut query_matches = cursor.matches(&query, tree.root_node(), content.as_bytes());
+        while let Some(match_) = query_matches.next() {
             let mut comments = String::new();
             let mut chunk_content = String::new();
 

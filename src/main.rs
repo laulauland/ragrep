@@ -14,6 +14,7 @@ mod context;
 mod db;
 mod embedder;
 mod indexer;
+mod reranker;
 
 use context::AppContext;
 use embedder::Embedding;
@@ -141,17 +142,32 @@ async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
 async fn query_codebase(ctx: &mut AppContext, query: String) -> Result<()> {
     debug!("Searching for: {}", query);
 
+    // Step 1: Get initial candidates using embedding similarity
     let Embedding(query_embedding) = ctx.embedder.embed_query(&query).await?;
-    let results = ctx.db.find_similar_chunks(&query_embedding, 10)?;
+    let initial_results = ctx.db.find_similar_chunks(&query_embedding, 50)?; // Get more candidates for reranking
 
-    if results.is_empty() {
+    if initial_results.is_empty() {
         info!("No similar code found");
         return Ok(());
     }
 
+    // Step 2: Rerank results for better relevance
+    debug!("Reranking {} initial results", initial_results.len());
+    let documents: Vec<String> = initial_results.iter().map(|(text, _, _, _, _, _)| text.clone()).collect();
+    let reranked_indices = ctx.reranker.rerank(&query, &documents, Some(10))?;
+
+    // Step 3: Map reranked results back to original data
+    let results: Vec<_> = reranked_indices
+        .iter()
+        .map(|(idx, score)| {
+            let (text, file_path, start_line, end_line, node_type, _distance) = &initial_results[*idx];
+            (text.clone(), file_path.clone(), *start_line, *end_line, node_type.clone(), *score)
+        })
+        .collect();
+
     let mut stdout = StandardStream::stdout(ColorChoice::Auto);
 
-    for (text, file_path, start_line, end_line, _node_type, distance) in results {
+    for (text, file_path, start_line, end_line, _node_type, relevance_score) in results {
         // Print file path in purple with line range
         stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
         write!(stdout, "{}:", file_path)?;
@@ -160,11 +176,11 @@ async fn query_codebase(ctx: &mut AppContext, query: String) -> Result<()> {
         stdout.reset()?;
 
         debug!(
-            "Match found in {} (lines {}-{}) with similarity: {:.2}%",
+            "Match found in {} (lines {}-{}) with relevance score: {:.4}",
             file_path,
             start_line,
             end_line,
-            (1.0 - distance) * 100.0
+            relevance_score
         );
 
         // Print content with line numbers
