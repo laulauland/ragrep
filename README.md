@@ -10,11 +10,12 @@ A semantic code search tool that uses embeddings to find similar code snippets a
 
 ## Features
 
-- Semantic code search using embeddings
-- Fully local, no API keys or dependencies
-- Supports multiple programming languages through tree-sitter
-- Fast SQLite-based storage for embeddings and code chunks
-- Intelligent code chunking based on AST
+- **Semantic search** - Find code by meaning, not just keywords
+- **Fully local** - No API keys, no cloud dependencies
+- **Fast server mode** - Keep models loaded for 10x faster queries (0.5s vs 7s)
+- **Auto-reindex** - File changes trigger instant reindexing (~200ms)
+- **Multi-language** - Rust, Python, JavaScript, TypeScript via tree-sitter
+- **Smart caching** - Reuse embeddings for unchanged code chunks
 
 ## Installation
 
@@ -37,65 +38,105 @@ cargo build --release
 
 The binary will be available at `target/release/ragrep`
 
-## Usage
+## Quick Start
 
 > [!IMPORTANT]
-> The first time you run ragrep, it will download a model and cache it in is global data directory. This might take a minute and will use about 1.5GB of disk space.
+> First run downloads models (~1.5GB) to `~/.cache/ragrep/models/`
 
-### Indexing Your Codebase
-
-Before searching, you need to index your codebase:
+### 1. Index Your Codebase
 
 ```bash
-# Index the current directory
 ragrep index
-
-# Index a specific directory
-ragrep index --path /path/to/your/code
 ```
 
-### Searching Code
+### 2. Start the Server (Recommended)
 
 ```bash
-# Search for code similar to your query
+# Start server in background
+ragrep serve &
+
+# Server loads models once (4.6s)
+# Queries now run in 0.5s instead of 7s
+# File edits auto-reindex in ~200ms
+```
+
+### 3. Search
+
+```bash
 ragrep "handle http request error"
 ```
 
-The search results will show relevant code snippets along with their file locations, formatted in a familiar ripgrep-style output.
+## Usage Modes
 
-### Debug Mode
-
-To see similarity scores in the output:
+### Server Mode (Fast, Recommended)
 
 ```bash
-RUST_LOG=debug ragrep "your query"
+# Terminal 1: Start server
+$ ragrep serve
+[INFO] Loading embedder model...
+[INFO] Loading reranker model...
+[INFO] File watcher started
+[INFO] Server listening on .ragrep/ragrep.sock
+
+# Terminal 2: Search (uses server automatically)
+$ ragrep "error handling"  # 0.5s ⚡
+
+# Edit files - auto-reindexed!
+$ vim src/main.rs  # Save triggers reindex (~200ms)
+```
+
+### Standalone Mode (Fallback)
+
+```bash
+# Works without server (loads models each time)
+$ ragrep "search query"  # 7s 🐌
+```
+
+## Auto-Reindexing
+
+When server is running:
+- Watches `.rs`, `.py`, `.js`, `.ts` files
+- Respects `.gitignore` and `.ragrepignore`
+- Debounced (default 1000ms)
+- Smart caching reuses embeddings for unchanged chunks
+- Only git repositories (gracefully disabled otherwise)
+
+Configuration in `.ragrep/config.toml`:
+```toml
+[server.git_watch]
+enabled = true
+debounce_ms = 1000
 ```
 
 ## Supported Languages
 
-- Rust
-- Python
-- JavaScript
-- TypeScript
+- Rust (`.rs`)
+- Python (`.py`)
+- JavaScript (`.js`)
+- TypeScript (`.ts`)
 
-More languages can be added by including their respective tree-sitter parsers.
+More languages can be added via tree-sitter parsers.
 
 ## How It Works
 
-1. **Indexing**:
-   - Scans your codebase for supported files
-   - Uses tree-sitter to parse code into meaningful chunks
-   - Generates embeddings for each code chunk
-   - Stores chunks and embeddings in a SQLite database
+**Indexing**:
+- Scan files (respects `.gitignore` and `.ragrepignore`)
+- Parse with tree-sitter into semantic chunks (functions, classes, etc.)
+- Generate 1024-dim embeddings (mixedbread-ai/mxbai-embed-large-v1)
+- Store in SQLite with `sqlite-vec` extension
 
-2. **Searching**:
-   - Converts your search query into an embedding
-   - Finds code chunks with similar embeddings using vector similarity
-   - Ranks and displays the most relevant results
+**Searching**:
+- Embed query → vector similarity search → rerank with BAAI/bge-reranker-base
+- Results show file path, line numbers, and relevant code
 
-## Contributing
+**Auto-Reindexing**:
+- Watch source files for changes
+- Incremental reindex with smart embedding cache
+- Only re-embed modified chunks (10-15x faster than full reindex)
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+## Development
+
+See [DEVELOPING.md](DEVELOPING.md) for architecture, setup, and contribution guidelines.
 
 ## License
 
