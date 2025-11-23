@@ -1,6 +1,7 @@
+use crate::constants::constants;
 use crate::context::AppContext;
 use crate::embedder::Embedding;
-use crate::git_watcher::GitIndexWatcher;
+use crate::git_watcher::GitFileWatcher;
 use crate::protocol::{Message, SearchRequest, SearchResponse, SearchResult, SearchStats};
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use log::{debug, error, info, warn};
@@ -22,9 +23,9 @@ pub struct RagrepServer {
 impl RagrepServer {
     /// Create a new server instance
     pub fn new(context: AppContext, base_path: &std::path::Path) -> Self {
-        let ragrep_dir = base_path.join(".ragrep");
-        let socket_path = ragrep_dir.join("ragrep.sock");
-        let pid_path = ragrep_dir.join("server.pid");
+        let ragrep_dir = base_path.join(constants::RAGREP_DIR_NAME);
+        let socket_path = ragrep_dir.join(constants::SOCKET_FILENAME);
+        let pid_path = ragrep_dir.join(constants::PID_FILENAME);
 
         Self {
             context: Arc::new(Mutex::new(context)),
@@ -146,7 +147,7 @@ impl RagrepServer {
         };
 
         if !config_enabled {
-            info!("Git watching disabled in config");
+            info!("File watching disabled in config");
             return Ok(None);
         }
 
@@ -158,20 +159,21 @@ impl RagrepServer {
             .and_then(|p| p.parent())
             .ok_or_else(|| anyhow!("Invalid socket path"))?;
 
-        if !GitIndexWatcher::is_git_repo(base_path) {
-            warn!("Not in a git repository, git watching disabled");
+        if !GitFileWatcher::is_git_repo(base_path) {
+            warn!("Not in a git repository, file watching disabled");
             return Ok(None);
         }
 
-        // Start watcher
-        let watcher = GitIndexWatcher::new(base_path)?;
+        // Start file watcher (watches .rs, .py, .js, .ts files)
+        let watcher = GitFileWatcher::new(base_path)?;
         let debounce = {
             let context = self.context.lock().await;
             context.config_manager.config().git_watch.debounce_ms
         };
         let rx = watcher.watch_debounced(debounce)?;
 
-        info!("Git watcher started (debounce: {}ms)", debounce);
+        info!("File watcher started (debounce: {}ms)", debounce);
+        info!("Watching .rs, .py, .js, .ts files (respecting .gitignore)");
 
         Ok(Some(rx))
     }

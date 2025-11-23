@@ -91,11 +91,11 @@ We'll build this in 7 milestones, each with verifiable behavior:
 
 ---
 
-## Milestone 1: Git Change Detection
+## Milestone 1: Git Repository Detection
 
-**Goal**: Use git2 to detect which files have changed since last reindex.
+**Goal**: Detect if we're in a git repository to enable file watching.
 
-**Why First**: Need to reliably identify changed files before watching for changes.
+**Why First**: We only enable file watching if we're in a git repo. Need a simple check before proceeding.
 
 ### Step 1.1: Add Dependencies
 
@@ -107,69 +107,31 @@ cargo add git2
 
 ### Step 1.2: Create `src/git_watcher.rs`
 
-Create a new file with git change detection:
+Create a new file with a simple git repo checker:
 
 ```rust
-use anyhow::{anyhow, Context as AnyhowContext, Result};
-use git2::{Repository, StatusOptions};
-use log::{debug, warn};
+use anyhow::{Context as AnyhowContext, Result};
+use git2::Repository;
+use log::debug;
 use std::path::{Path, PathBuf};
 
-/// Detects file changes in a git repository
-pub struct GitChangeDetector {
-    repo: Repository,
+/// Check if the given path is in a git repository
+pub fn is_git_repo(path: &Path) -> bool {
+    Repository::discover(path).is_ok()
 }
 
-impl GitChangeDetector {
-    /// Create a new change detector for the given directory
-    pub fn new(base_path: &Path) -> Result<Self> {
-        let repo = Repository::discover(base_path)
-            .context("Failed to find git repository")?;
-        
-        debug!("Found git repository at: {:?}", repo.path());
-        
-        Ok(Self { repo })
-    }
-
-    /// Get list of files that have changed (modified, added, deleted, renamed)
-    pub fn get_changed_files(&self) -> Result<Vec<PathBuf>> {
-        let mut opts = StatusOptions::new();
-        opts.include_untracked(true);
-        opts.recurse_untracked_dirs(true);
-        
-        let statuses = self.repo.statuses(Some(&mut opts))
-            .context("Failed to get git status")?;
-        
-        let mut changed_files = Vec::new();
-        
-        for entry in statuses.iter() {
-            let status = entry.status();
-            let path = entry.path()
-                .ok_or_else(|| anyhow!("Invalid UTF-8 in file path"))?;
-            
-            // Include modified, new, deleted, renamed, or typechanged files
-            if status.is_wt_modified() 
-                || status.is_wt_new()
-                || status.is_wt_deleted()
-                || status.is_wt_renamed()
-                || status.is_wt_typechange()
-            {
-                let full_path = self.repo.workdir()
-                    .ok_or_else(|| anyhow!("Repository has no working directory"))?
-                    .join(path);
-                
-                changed_files.push(full_path);
-                debug!("Detected change: {}", path);
-            }
-        }
-        
-        Ok(changed_files)
-    }
-
-    /// Check if the given path is in a git repository
-    pub fn is_git_repo(path: &Path) -> bool {
-        Repository::discover(path).is_ok()
-    }
+/// Get the git working directory for a path
+pub fn get_git_workdir(path: &Path) -> Result<PathBuf> {
+    let repo = Repository::discover(path)
+        .context("Failed to find git repository")?;
+    
+    let workdir = repo.workdir()
+        .ok_or_else(|| anyhow::anyhow!("Repository has no working directory"))?
+        .to_path_buf();
+    
+    debug!("Found git working directory: {:?}", workdir);
+    
+    Ok(workdir)
 }
 
 #[cfg(test)]
@@ -180,10 +142,16 @@ mod tests {
     fn test_is_git_repo() {
         // This test directory should be in a git repo
         let current_dir = std::env::current_dir().unwrap();
-        assert!(GitChangeDetector::is_git_repo(&current_dir));
+        assert!(is_git_repo(&current_dir));
     }
 }
 ```
+
+**Key Point**: We only need two simple functions:
+- `is_git_repo()` - Check if git repo exists
+- `get_git_workdir()` - Get the working directory path
+
+We DON'T need `get_changed_files()` because the file watcher gets events directly!
 
 ### Step 1.3: Update `src/main.rs` Module Declaration
 
@@ -265,7 +233,6 @@ const RAGREP_IGNORE_FILENAME: &str = ".ragrepignore";
 
 /// Watches source files in working directory for changes
 pub struct GitFileWatcher {
-    detector: GitChangeDetector,
     watch_path: PathBuf,
     gitignore: Gitignore,
 }
@@ -273,11 +240,8 @@ pub struct GitFileWatcher {
 impl GitFileWatcher {
     /// Create a new file watcher for git-tracked files
     pub fn new(base_path: &Path) -> Result<Self> {
-        let detector = GitChangeDetector::new(base_path)?;
-        
-        let watch_path = detector.repo.workdir()
-            .ok_or_else(|| anyhow!("No working directory"))?
-            .to_path_buf();
+        // Get git working directory
+        let watch_path = get_git_workdir(base_path)?;
         
         // Build gitignore matcher (same approach as indexer for consistency)
         let mut builder = GitignoreBuilder::new(&watch_path);
@@ -300,7 +264,6 @@ impl GitFileWatcher {
         debug!("Using .gitignore and {} for filtering", RAGREP_IGNORE_FILENAME);
         
         Ok(Self {
-            detector,
             watch_path,
             gitignore,
         })
@@ -367,70 +330,6 @@ impl GitFileWatcher {
         watcher.watch(&self.watch_path, RecursiveMode::Recursive)?;
         
         // Keep watcher alive
-        std::mem::forget(watcher);
-        
-        Ok(rx)
-    }
-}
-
-impl GitIndexWatcher {
-    /// Create a new git index watcher
-    pub fn new(base_path: &Path) -> Result<Self> {
-        let detector = GitChangeDetector::new(base_path)?;
-        
-        let git_index_path = detector.repo.path().join("index");
-        
-        if !git_index_path.exists() {
-            return Err(anyhow!("Git index file not found at {:?}", git_index_path));
-        }
-        
-        debug!("Watching git index at: {:?}", git_index_path);
-        
-        Ok(Self {
-            detector,
-            git_index_path,
-        })
-    }
-
-    /// Start watching for changes, returns a channel that receives changed files
-    pub fn watch(&self) -> Result<Receiver<Vec<PathBuf>>> {
-        let (tx, rx) = channel();
-        let detector = GitChangeDetector::new(
-            self.detector.repo.workdir()
-                .ok_or_else(|| anyhow!("No working directory"))?
-        )?;
-        
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        // Only care about modify events
-                        if matches!(event.kind, EventKind::Modify(_)) {
-                            debug!("Git index modified, checking for changes...");
-                            match detector.get_changed_files() {
-                                Ok(files) if !files.is_empty() => {
-                                    debug!("Found {} changed files", files.len());
-                                    let _ = tx.send(files);
-                                }
-                                Ok(_) => {
-                                    debug!("No changed files detected");
-                                }
-                                Err(e) => {
-                                    warn!("Error detecting changes: {}", e);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => warn!("Watch error: {:?}", e),
-                }
-            },
-            Config::default(),
-        )?;
-
-        watcher.watch(&self.git_index_path, RecursiveMode::NonRecursive)?;
-        
-        // Keep watcher alive by leaking it (it will live for program lifetime)
-        // This is intentional for a long-running server
         std::mem::forget(watcher);
         
         Ok(rx)
@@ -808,7 +707,7 @@ echo "// test change" >> src/main.rs
 Update `src/server.rs`:
 
 ```rust
-use crate::git_watcher::{GitFileWatcher, GitChangeDetector};
+use crate::git_watcher::{GitFileWatcher, is_git_repo};
 use std::sync::mpsc::Receiver;
 
 impl RagrepServer {
@@ -861,7 +760,7 @@ impl RagrepServer {
             .and_then(|p| p.parent())
             .ok_or_else(|| anyhow!("Invalid socket path"))?;
         
-        if !GitChangeDetector::is_git_repo(base_path) {
+        if !is_git_repo(base_path) {
             warn!("Not in a git repository, file watching disabled");
             return Ok(None);
         }
@@ -956,24 +855,22 @@ echo "test" >> target/debug/main.rs
 
 **Why**: Not all projects use git. Server should still work, just without auto-reindex.
 
-### Step 6.1: Add is_git_repo Helper
+### Step 6.1: is_git_repo Helper
 
-Already added in Milestone 1, but update usage:
+Already added in Milestone 1:
 
 ```rust
-impl GitChangeDetector {
-    pub fn is_git_repo(path: &Path) -> bool {
-        Repository::discover(path).is_ok()
-    }
+pub fn is_git_repo(path: &Path) -> bool {
+    Repository::discover(path).is_ok()
 }
 ```
 
-### Step 6.2: Update Server to Handle Non-Git
+### Step 6.2: Server Handles Non-Git Projects
 
 The code in Milestone 5 already handles this:
 
 ```rust
-if !GitChangeDetector::is_git_repo(base_path) {
+if !is_git_repo(base_path) {
     warn!("Not in a git repository, file watching disabled");
     return Ok(None);
 }
@@ -1017,22 +914,21 @@ Add to `tests/integration_test.rs`:
 ```rust
 #[tokio::test]
 async fn test_git_watcher() -> Result<()> {
-    use ragrep::git_watcher::GitChangeDetector;
+    use ragrep::git_watcher::{is_git_repo, get_git_workdir, GitFileWatcher};
     
     // Check if we're in a git repo
     let current_dir = std::env::current_dir()?;
-    if !GitChangeDetector::is_git_repo(&current_dir) {
-        println!("Skipping git watcher test (not in git repo)");
+    if !is_git_repo(&current_dir) {
+        println!("Skipping file watcher test (not in git repo)");
         return Ok(());
     }
     
-    let detector = GitChangeDetector::new(&current_dir)?;
-    let changed = detector.get_changed_files()?;
+    let workdir = get_git_workdir(&current_dir)?;
+    println!("Git working directory: {}", workdir.display());
     
-    println!("Found {} changed files", changed.len());
-    for file in &changed {
-        println!("  - {}", file.display());
-    }
+    // Create file watcher
+    let watcher = GitFileWatcher::new(&current_dir)?;
+    println!("File watcher created successfully");
     
     Ok(())
 }

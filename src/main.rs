@@ -11,6 +11,7 @@ use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 mod chunker;
 mod client;
 mod config;
+mod constants;
 mod context;
 mod db;
 mod embedder;
@@ -59,7 +60,12 @@ async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
     if let Some(local_path) = &ctx.config_manager.local_config_path {
         debug!("Local config: {}", local_path.display());
     }
-    debug!("Database: {}", ctx.ragrep_dir.join("ragrep.db").display());
+    debug!(
+        "Database: {}",
+        ctx.ragrep_dir
+            .join(constants::constants::DATABASE_FILENAME)
+            .display()
+    );
     let model_cache_dir = ctx.config_manager.get_model_cache_dir()?;
     debug!("Model cache: {}", model_cache_dir.display());
     info!("Indexing codebase at: {}", path.display());
@@ -145,7 +151,12 @@ async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
     chunks_pb.finish_with_message("Chunks processing complete!");
 
     info!("Indexing complete! {} chunks processed", processed_chunks);
-    debug!("Database: {}", ctx.ragrep_dir.join("ragrep.db").display());
+    debug!(
+        "Database: {}",
+        ctx.ragrep_dir
+            .join(constants::constants::DATABASE_FILENAME)
+            .display()
+    );
 
     Ok(())
 }

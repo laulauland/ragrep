@@ -1,5 +1,6 @@
 use crate::chunker::Chunker;
 use crate::config::ConfigManager;
+use crate::constants::constants;
 use crate::db::Database;
 use crate::embedder::Embedder;
 use crate::indexer::{FileInfo, Indexer};
@@ -25,11 +26,11 @@ impl AppContext {
         let config_manager = ConfigManager::new(Some(base_path))?;
 
         // Create .ragrep directory if it doesn't exist
-        let ragrep_dir = base_path.join(".ragrep");
+        let ragrep_dir = base_path.join(constants::RAGREP_DIR_NAME);
         fs::create_dir_all(&ragrep_dir)?;
 
         // Initialize database
-        let db_path = ragrep_dir.join("ragrep.db");
+        let db_path = ragrep_dir.join(constants::DATABASE_FILENAME);
         let db = Database::new(&db_path)
             .with_context(|| format!("Failed to initialize database at {}", db_path.display()))?;
 

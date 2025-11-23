@@ -1,3 +1,4 @@
+use crate::constants::constants;
 use crate::protocol::{Message, SearchRequest, SearchResponse};
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use log::debug;
@@ -69,7 +70,9 @@ fn find_ragrep_socket(start_dir: &Path) -> Result<PathBuf> {
     let mut current = start_dir;
 
     loop {
-        let socket_path = current.join(".ragrep").join("ragrep.sock");
+        let socket_path = current
+            .join(constants::RAGREP_DIR_NAME)
+            .join(constants::SOCKET_FILENAME);
 
         if socket_path.exists() {
             debug!("Found socket at {}", socket_path.display());

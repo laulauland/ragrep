@@ -3,13 +3,16 @@ use git2::{Repository, StatusOptions};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use log::{debug, warn};
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{
     mpsc::{channel, Receiver},
-    Arc,
+    Arc, Mutex as StdMutex,
 };
 use tokio::time::{sleep, Duration};
+
+use crate::constants::constants;
 
 /// Detects file changes in a git repository
 pub struct GitChangeDetector {
@@ -251,6 +254,11 @@ pub struct GitFileWatcher {
 }
 
 impl GitFileWatcher {
+    /// Check if the given path is in a git repository
+    pub fn is_git_repo(path: &Path) -> bool {
+        GitChangeDetector::is_git_repo(path)
+    }
+
     /// Create a new file watcher for git-tracked files
     pub fn new(base_path: &Path) -> Result<Self> {
         let detector = GitChangeDetector::new(base_path)?;
@@ -261,32 +269,28 @@ impl GitFileWatcher {
             .ok_or_else(|| anyhow!("No working directory"))?
             .to_path_buf();
 
-        // Build gitignore matcher
+        // Build gitignore matcher (same approach as indexer for consistency)
         let mut builder = GitignoreBuilder::new(&watch_path);
 
         // Add .gitignore from repo root
         let gitignore_path = watch_path.join(".gitignore");
         if gitignore_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&gitignore_path) {
-                for line in content.lines() {
-                    let _ = builder.add_line(None, line);
-                }
-            }
+            builder.add_line(None, &std::fs::read_to_string(&gitignore_path)?)?;
         }
 
-        // Add .ragrepignore if exists
-        let ragrepignore_path = watch_path.join(".ragrepignore");
+        // Add .ragrepignore (custom ignore file, same as indexer)
+        let ragrepignore_path = watch_path.join(constants::RAGREP_IGNORE_FILENAME);
         if ragrepignore_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&ragrepignore_path) {
-                for line in content.lines() {
-                    let _ = builder.add_line(None, line);
-                }
-            }
+            builder.add_line(None, &std::fs::read_to_string(&ragrepignore_path)?)?;
         }
 
         let gitignore = builder.build()?;
 
         debug!("Watching source files at: {:?}", watch_path);
+        debug!(
+            "Using .gitignore and {} for filtering",
+            constants::RAGREP_IGNORE_FILENAME
+        );
 
         Ok(Self {
             detector,
@@ -297,24 +301,17 @@ impl GitFileWatcher {
 
     /// Check if a path should be ignored
     fn should_ignore(&self, path: &Path) -> bool {
-        // Check gitignore
-        let relative_path = path.strip_prefix(&self.watch_path).unwrap_or(path);
-        if self
-            .gitignore
-            .matched(relative_path, path.is_dir())
-            .is_ignore()
-        {
+        // Check gitignore (includes .ragrepignore patterns)
+        if self.gitignore.matched(path, path.is_dir()).is_ignore() {
             return true;
         }
 
-        // Always ignore common build/cache directories
+        // Always ignore common build/cache directories as fallback
+        // (in case .gitignore is missing)
         let components: Vec<_> = path.components().collect();
         for component in &components {
             if let Some(name) = component.as_os_str().to_str() {
-                if matches!(
-                    name,
-                    "node_modules" | "target" | ".git" | "__pycache__" | ".next" | "dist" | "build"
-                ) {
+                if constants::IGNORED_DIRECTORIES.contains(&name) {
                     return true;
                 }
             }
@@ -335,19 +332,15 @@ impl GitFileWatcher {
         let gitignore_path = watch_path.join(".gitignore");
         if gitignore_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&gitignore_path) {
-                for line in content.lines() {
-                    let _ = builder.add_line(None, line);
-                }
+                let _ = builder.add_line(None, &content);
             }
         }
 
         // Add .ragrepignore if exists
-        let ragrepignore_path = watch_path.join(".ragrepignore");
+        let ragrepignore_path = watch_path.join(constants::RAGREP_IGNORE_FILENAME);
         if ragrepignore_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&ragrepignore_path) {
-                for line in content.lines() {
-                    let _ = builder.add_line(None, line);
-                }
+                let _ = builder.add_line(None, &content);
             }
         }
 
@@ -362,10 +355,13 @@ impl GitFileWatcher {
                         // Only care about modify events (file saved)
                         if matches!(event.kind, EventKind::Modify(_)) {
                             for path in event.paths {
-                                // Check if path should be ignored (gitignore, build dirs, etc.)
+                                // Check if path should be ignored (gitignore, ragrepignore, build dirs, etc.)
                                 let relative_path = path.strip_prefix(&watch_path).unwrap_or(&path);
                                 if gitignore.matched(relative_path, path.is_dir()).is_ignore() {
-                                    debug!("Ignoring gitignored file: {}", path.display());
+                                    debug!(
+                                        "Ignoring file (gitignore/ragrepignore): {}",
+                                        path.display()
+                                    );
                                     continue;
                                 }
 
@@ -374,16 +370,7 @@ impl GitFileWatcher {
                                 let mut should_skip = false;
                                 for component in &components {
                                     if let Some(name) = component.as_os_str().to_str() {
-                                        if matches!(
-                                            name,
-                                            "node_modules"
-                                                | "target"
-                                                | ".git"
-                                                | "__pycache__"
-                                                | ".next"
-                                                | "dist"
-                                                | "build"
-                                        ) {
+                                        if constants::IGNORED_DIRECTORIES.contains(&name) {
                                             should_skip = true;
                                             break;
                                         }
@@ -393,9 +380,13 @@ impl GitFileWatcher {
                                     continue;
                                 }
 
-                                // Only process source files (rs, py, js, ts)
+                                // Only process source files
                                 if let Some(ext) = path.extension() {
-                                    if matches!(ext.to_str(), Some("rs" | "py" | "js" | "ts")) {
+                                    if ext
+                                        .to_str()
+                                        .map(|e| constants::DEFAULT_FILE_EXTENSIONS.contains(&e))
+                                        .unwrap_or(false)
+                                    {
                                         debug!("File modified: {}", path.display());
                                         let _ = tx.send(path);
                                     }
@@ -414,6 +405,65 @@ impl GitFileWatcher {
 
         // Keep watcher alive
         std::mem::forget(watcher);
+
+        Ok(rx)
+    }
+
+    /// Start watching with debouncing (collects changed files and waits for quiet period)
+    pub fn watch_debounced(&self, debounce_ms: u64) -> Result<Receiver<Vec<PathBuf>>> {
+        let (tx, rx) = channel();
+        let (file_tx, file_rx) = channel::<PathBuf>();
+
+        // Shared set of changed files
+        use std::collections::HashSet;
+        use std::sync::Mutex as StdMutex;
+        let changed_files = Arc::new(StdMutex::new(HashSet::new()));
+        let changed_files_clone = Arc::clone(&changed_files);
+
+        // Spawn debounce task
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_millis(debounce_ms)).await;
+
+                // Check if we have any changed files
+                let files_to_reindex: Vec<PathBuf> = {
+                    let mut guard = changed_files_clone.lock().unwrap();
+                    if guard.is_empty() {
+                        Vec::new()
+                    } else {
+                        let files: Vec<PathBuf> = guard.iter().cloned().collect();
+                        guard.clear();
+                        files
+                    }
+                };
+
+                if !files_to_reindex.is_empty() {
+                    debug!(
+                        "Debounce period elapsed, reindexing {} files",
+                        files_to_reindex.len()
+                    );
+                    let _ = tx.send(files_to_reindex);
+                }
+            }
+        });
+
+        // Spawn file collector task
+        let changed_files_for_collector = Arc::clone(&changed_files);
+        std::thread::spawn(move || {
+            while let Ok(path) = file_rx.recv() {
+                let mut guard = changed_files_for_collector.lock().unwrap();
+                guard.insert(path.clone());
+                debug!("File queued for reindex: {}", path.display());
+            }
+        });
+
+        // Start the file watcher
+        let watch_rx = self.watch()?;
+        std::thread::spawn(move || {
+            while let Ok(path) = watch_rx.recv() {
+                let _ = file_tx.send(path);
+            }
+        });
 
         Ok(rx)
     }

@@ -4,14 +4,14 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use crate::constants::constants;
+
 #[derive(Debug, Serialize)]
 pub struct FileInfo {
     pub path: PathBuf,
     pub size: u64,
     pub modified: SystemTime,
 }
-
-const RAGREP_IGNORE_FILENAME: &str = ".ragrepignore";
 
 pub struct Indexer {
     include_extensions: Vec<String>,
@@ -20,12 +20,10 @@ pub struct Indexer {
 impl Indexer {
     pub fn new() -> Self {
         Self {
-            include_extensions: vec![
-                "rs".to_string(),
-                "py".to_string(),
-                "js".to_string(),
-                "ts".to_string(),
-            ],
+            include_extensions: constants::DEFAULT_FILE_EXTENSIONS
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
         }
     }
 
@@ -37,7 +35,7 @@ impl Indexer {
 
         let walker = WalkBuilder::new(&base_path)
             .hidden(false) // Include hidden files/dirs
-            .add_custom_ignore_filename(RAGREP_IGNORE_FILENAME)
+            .add_custom_ignore_filename(constants::RAGREP_IGNORE_FILENAME)
             .git_ignore(true) // Use .gitignore
             .git_global(true) // Use global gitignore
             .git_exclude(true) // Use .git/info/exclude

@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::constants::constants;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub model_cache_dir: Option<PathBuf>,
@@ -73,10 +75,10 @@ impl ConfigManager {
     pub fn new(workspace_path: Option<&Path>) -> Result<Self> {
         let global_config_dir = dirs::config_dir()
             .context("Could not find config directory")?
-            .join("ragrep");
+            .join(constants::GLOBAL_CONFIG_DIR_NAME);
 
         fs::create_dir_all(&global_config_dir)?;
-        let global_config_path = global_config_dir.join("config.toml");
+        let global_config_path = global_config_dir.join(constants::CONFIG_FILENAME);
 
         // Load or create global config
         let global_config = if global_config_path.exists() {
@@ -90,7 +92,9 @@ impl ConfigManager {
 
         // Load local config if workspace path is provided
         let (local_config, local_config_path) = if let Some(workspace_path) = workspace_path {
-            let local_config_path = workspace_path.join(".ragrep").join("config.toml");
+            let local_config_path = workspace_path
+                .join(constants::RAGREP_DIR_NAME)
+                .join(constants::CONFIG_FILENAME);
             let local_config = if local_config_path.exists() {
                 let content = fs::read_to_string(&local_config_path)?;
                 Some(toml::from_str::<Config>(&content).unwrap_or_default())
@@ -140,7 +144,9 @@ impl ConfigManager {
 
         // Default to system data directory
         let data_dir = dirs::data_dir().context("Could not find data directory")?;
-        Ok(data_dir.join("ragrep").join("models"))
+        Ok(data_dir
+            .join(constants::GLOBAL_CONFIG_DIR_NAME)
+            .join(constants::MODELS_DIR_NAME))
     }
 
     pub fn get_reranker_config(&self) -> Option<RerankerConfig> {
