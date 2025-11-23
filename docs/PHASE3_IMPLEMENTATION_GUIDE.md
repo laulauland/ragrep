@@ -465,18 +465,60 @@ pub struct Config {
 
 ---
 
-## Milestone 4: Incremental Reindexing
+## Milestone 4: Incremental Reindexing with Smart Caching
 
-**Goal**: Update only changed files in the database instead of full reindex.
+**Goal**: Update only changed files in database, reusing embeddings for unchanged chunks.
 
-**Why**: Reindexing 3 files takes 2 seconds vs 30 seconds for full reindex.
+**Why**: Makes reindex feel instant (~200ms) instead of slow (2+ seconds).
 
-### Step 4.1: Add Delete Methods to Database
+**Key Optimization**: Delete-then-insert strategy BUT with embedding reuse:
+1. Load old embeddings into cache (by content hash)
+2. Delete old chunks from database (clean slate)
+3. Generate new chunks
+4. Reuse embeddings where content hash matches (FAST!)
+5. Only re-embed chunks that actually changed (SLOW but rare)
+
+**Result**: Best of both worlds - correctness + speed!
+
+### Step 4.1: Add Methods to Database for Smart Reindexing
 
 Add to `src/db.rs`:
 
 ```rust
+use std::collections::HashMap;
+
 impl Database {
+    /// Get all chunks for a file with their hashes and embeddings (for reuse)
+    pub fn get_chunks_with_embeddings(&self, file_path: &str) -> Result<HashMap<i64, Vec<f32>>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT c.hash, v.embedding
+            FROM chunks c
+            JOIN chunks_vec v ON v.rowid = c.id
+            WHERE c.file_path = ?1
+            "#
+        )?;
+        
+        let mut cache = HashMap::new();
+        let mut rows = stmt.query([file_path])?;
+        
+        while let Some(row) = rows.next()? {
+            let hash: i64 = row.get(0)?;
+            let embedding_bytes: Vec<u8> = row.get(1)?;
+            
+            // Convert bytes back to f32 array
+            let embedding: Vec<f32> = embedding_bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+            
+            cache.insert(hash, embedding);
+        }
+        
+        debug!("Loaded {} embeddings for reuse from {}", cache.len(), file_path);
+        Ok(cache)
+    }
+    
     /// Delete all chunks for a specific file
     pub fn delete_file(&mut self, file_path: &str) -> Result<()> {
         let tx = self.conn.transaction()?;
@@ -520,7 +562,7 @@ impl Database {
 }
 ```
 
-### Step 4.2: Add Incremental Index Method to Context
+### Step 4.2: Add Smart Incremental Reindex to Context
 
 Add to `src/context.rs`:
 
@@ -528,9 +570,10 @@ Add to `src/context.rs`:
 use crate::chunker::Chunker;
 use crate::indexer::{Indexer, FileInfo};
 use log::info;
+use std::collections::HashMap;
 
 impl AppContext {
-    /// Incrementally reindex specific files
+    /// Incrementally reindex specific files with embedding reuse
     pub async fn reindex_files(&mut self, file_paths: Vec<PathBuf>) -> Result<()> {
         info!("Incrementally reindexing {} files", file_paths.len());
         
@@ -547,10 +590,16 @@ impl AppContext {
         
         let start = std::time::Instant::now();
         let mut total_chunks = 0;
+        let mut reused_embeddings = 0;
+        let mut new_embeddings = 0;
         
         for file in &files {
-            // Delete old chunks for this file
             let file_path_str = file.path.to_string_lossy().to_string();
+            
+            // OPTIMIZATION: Load old embeddings BEFORE deleting
+            let embedding_cache = self.db.get_chunks_with_embeddings(&file_path_str)?;
+            
+            // Delete old chunks for this file (clean slate)
             self.db.delete_file(&file_path_str)?;
             
             // Read and chunk the file
@@ -560,19 +609,31 @@ impl AppContext {
             let chunks = chunker.chunk_file(&file.path, &content)?;
             total_chunks += chunks.len();
             
-            // Embed and save chunks
-            for chunk in chunks {
-                let embedding = self.embedder.embed(&chunk.text)?;
+            // Embed and save chunks, REUSING embeddings where possible
+            for (idx, chunk) in chunks.iter().enumerate() {
+                let hash = chunk.hash() as i64;
+                
+                // Try to reuse embedding if content unchanged
+                let embedding = if let Some(cached) = embedding_cache.get(&hash) {
+                    // Content unchanged! Reuse old embedding (FAST!)
+                    reused_embeddings += 1;
+                    cached.clone()
+                } else {
+                    // Content changed, need to re-embed (SLOW)
+                    new_embeddings += 1;
+                    let result = self.embedder.embed_text(&chunk.content, &file_path_str).await?;
+                    result.0  // Extract Vec<f32> from Embedding wrapper
+                };
                 
                 self.db.save_chunk(
                     &file_path_str,
-                    chunk.chunk_index,
-                    &chunk.node_type.unwrap_or_default(),
-                    chunk.node_name.as_deref(),
+                    idx as i32,
+                    &chunk.kind,
+                    chunk.parent_name.as_deref(),
                     chunk.start_line,
                     chunk.end_line,
-                    &chunk.text,
-                    chunk.hash,
+                    &chunk.content,
+                    hash as u64,
                     &embedding,
                 )?;
             }
@@ -580,10 +641,12 @@ impl AppContext {
         
         let elapsed = start.elapsed();
         info!(
-            "Reindexed {} files ({} chunks) in {:.2}s",
+            "Reindexed {} files ({} chunks) in {:.2}s - reused {} embeddings, computed {} new",
             files.len(),
             total_chunks,
-            elapsed.as_secs_f64()
+            elapsed.as_secs_f64(),
+            reused_embeddings,
+            new_embeddings
         );
         
         Ok(())
@@ -999,15 +1062,35 @@ vim src/main.rs  # Just saving without git add
 - Insert into database
 ```
 
-### Incremental Reindex (Phase 3)
+### Incremental Reindex (Phase 3) - WITH SMART CACHING
 ```
-5 files: 2-3 seconds ⚡
-- Chunk 5 files
-- Embed 100 chunks
-- Delete + insert into database
+Edit 1 function in 1 file (file has 10 chunks):
+- Load old embeddings: ~10ms
+- Delete old chunks: ~5ms
+- Chunk file: ~20ms
+- Reuse 9 embeddings: instant ✅
+- Compute 1 new embedding: ~150ms
+- Insert 10 chunks: ~10ms
+Total: ~200ms ⚡⚡⚡
 
-10x-15x faster for typical edits!
+Edit 3 files (15 chunks each, 5 changed per file):
+- Process 3 files × (45 chunks total)
+- Reuse 30 embeddings: instant ✅
+- Compute 15 new embeddings: ~750ms
+- Database ops: ~50ms
+Total: ~800ms ⚡⚡
+
+100x-150x faster than full reindex for typical edits!
 ```
+
+### Key Optimization: Embedding Reuse
+
+**Strategy**: Hash-based embedding cache
+- Delete-then-insert ensures correct line numbers
+- But REUSE embeddings for unchanged chunk content
+- Only re-embed chunks that actually changed
+
+**Result**: Typical single-function edit feels INSTANT (<250ms)
 
 ### Debounce Timing
 ```
