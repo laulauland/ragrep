@@ -27,12 +27,12 @@ With git-based auto-reindexing:
 ```bash
 # Start server (once)
 $ ragrep serve
-[INFO] Server ready, watching for git changes...
+[INFO] Server ready, watching for file changes...
 
-# Edit some files in your editor
+# Edit some files in your editor (NO git add needed!)
 $ vim src/main.rs       # Edit and save
-[INFO] Detected 1 changed file, reindexing...
-[INFO] Reindexed 1 file in 1.2s
+[DEBUG] File queued for reindex: src/main.rs
+[INFO] Reindexed 1 file in 0.2s ⚡
 
 $ ragrep "new function"  # Immediately finds your new code!
 ```
@@ -66,10 +66,9 @@ $ ragrep "new function"  # Immediately finds your new code!
 │    ├─ Server runs, keeps models loaded                    │
 │    └─ Git watcher starts automatically                    │
 │                                                             │
-│  $ vim src/main.rs  # Edit and save                        │
-│    [INFO] Detected 1 changed file                          │
-│    [INFO] Reindexing: src/main.rs                          │
-│    [INFO] Reindexed 1 file in 1.2s ⚡                      │
+│  $ vim src/main.rs  # Edit and save (NO git add!)           │
+│    [DEBUG] File queued for reindex: src/main.rs            │
+│    [INFO] Reindexed 1 file in 0.2s ⚡                      │
 │                                                             │
 │  $ ragrep "new code"                                       │
 │    ✅ Found immediately (auto-reindexed!)                  │
@@ -225,9 +224,11 @@ test result: ok. 1 passed; 0 failed
 
 ## Milestone 2: File System Watching
 
-**Goal**: Watch `.git/index` file for modifications to trigger change detection.
+**Goal**: Watch source files directly for modifications to trigger instant reindexing.
 
-**Why**: Git updates `.git/index` whenever files are staged or committed. This is our trigger point.
+**Why**: Waiting for `git add` is bad UX. Developers expect changes to be indexed immediately on save.
+
+**Design Decision**: We'll watch actual source files (`.rs`, `.py`, etc.) in the working directory, not `.git/index`. This gives instant feedback while still using git to determine which files are relevant.
 
 ### Step 2.1: Add Notify Dependency
 
@@ -244,13 +245,67 @@ Add to the existing `src/git_watcher.rs`:
 
 ```rust
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use std::sync::mpsc::{channel, Receiver};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
-/// Watches git index file for changes
-pub struct GitIndexWatcher {
+/// Watches source files in working directory for changes
+pub struct GitFileWatcher {
     detector: GitChangeDetector,
-    git_index_path: PathBuf,
+    watch_path: PathBuf,
+}
+
+impl GitFileWatcher {
+    /// Create a new file watcher for git-tracked files
+    pub fn new(base_path: &Path) -> Result<Self> {
+        let detector = GitChangeDetector::new(base_path)?;
+        
+        let watch_path = detector.repo.workdir()
+            .ok_or_else(|| anyhow!("No working directory"))?
+            .to_path_buf();
+        
+        debug!("Watching source files at: {:?}", watch_path);
+        
+        Ok(Self {
+            detector,
+            watch_path,
+        })
+    }
+
+    /// Start watching for changes, returns a channel that receives changed file paths
+    pub fn watch(&self) -> Result<Receiver<PathBuf>> {
+        let (tx, rx) = channel();
+        
+        let mut watcher = RecommendedWatcher::new(
+            move |res: Result<Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        // Only care about modify events (file saved)
+                        if matches!(event.kind, EventKind::Modify(_)) {
+                            for path in event.paths {
+                                // Only process source files (rs, py, js, ts)
+                                if let Some(ext) = path.extension() {
+                                    if matches!(ext.to_str(), Some("rs" | "py" | "js" | "ts")) {
+                                        debug!("File modified: {}", path.display());
+                                        let _ = tx.send(path);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => warn!("Watch error: {:?}", e),
+                }
+            },
+            Config::default(),
+        )?;
+
+        // Watch the entire working directory recursively
+        watcher.watch(&self.watch_path, RecursiveMode::Recursive)?;
+        
+        // Keep watcher alive
+        std::mem::forget(watcher);
+        
+        Ok(rx)
+    }
 }
 
 impl GitIndexWatcher {
@@ -326,14 +381,15 @@ Create a simple test program to verify watching works:
 # In another terminal, create a test
 cargo run -- serve &
 
-# Make a change to trigger reindex
+# Make a change to trigger reindex (NO git add needed!)
 echo "// test" >> src/main.rs
-git add src/main.rs
 
 # Check server logs for detection
 ```
 
-**Expected Behavior**: Server logs should show "Git index modified, checking for changes..."
+**Expected Behavior**: Server logs should show "File modified: src/main.rs" immediately on save!
+
+**Key Point**: Notice we did NOT run `git add`. The watcher detects file saves directly, giving instant feedback!
 
 ---
 
@@ -345,87 +401,65 @@ git add src/main.rs
 
 ### Step 3.1: Add Debouncing to Watcher
 
-Update `GitIndexWatcher::watch()` in `src/git_watcher.rs`:
+Update `GitFileWatcher` in `src/git_watcher.rs` to add debouncing:
 
 ```rust
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::time::{sleep, Duration};
+use std::sync::Mutex as StdMutex;
+use std::collections::HashSet;
+use tokio::time::{sleep, Duration as TokioDuration};
 
-impl GitIndexWatcher {
-    /// Start watching with debouncing (waits for quiet period before triggering)
+impl GitFileWatcher {
+    /// Start watching with debouncing (collects changed files and waits for quiet period)
     pub fn watch_debounced(&self, debounce_ms: u64) -> Result<Receiver<Vec<PathBuf>>> {
         let (tx, rx) = channel();
-        let detector = GitChangeDetector::new(
-            self.detector.repo.workdir()
-                .ok_or_else(|| anyhow!("No working directory"))?
-        )?;
+        let (file_tx, file_rx) = channel::<PathBuf>();
         
-        // Timestamp of last modification
-        let last_modified = Arc::new(AtomicU64::new(0));
-        let last_modified_clone = Arc::clone(&last_modified);
+        // Shared set of changed files
+        let changed_files = Arc::new(StdMutex::new(HashSet::new()));
+        let changed_files_clone = Arc::clone(&changed_files);
         
         // Spawn debounce task
-        let tx_clone = tx.clone();
-        let detector_clone = GitChangeDetector::new(
-            self.detector.repo.workdir().unwrap()
-        )?;
-        
         tokio::spawn(async move {
             loop {
-                sleep(Duration::from_millis(debounce_ms)).await;
+                sleep(TokioDuration::from_millis(debounce_ms)).await;
                 
-                let last_mod = last_modified_clone.load(Ordering::Relaxed);
-                if last_mod > 0 {
-                    let elapsed = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis() as u64 - last_mod;
-                    
-                    // If enough time has passed since last modification
-                    if elapsed >= debounce_ms {
-                        debug!("Debounce period elapsed, checking changes...");
-                        match detector_clone.get_changed_files() {
-                            Ok(files) if !files.is_empty() => {
-                                debug!("Sending {} files for reindex", files.len());
-                                let _ = tx_clone.send(files);
-                                last_modified_clone.store(0, Ordering::Relaxed);
-                            }
-                            Ok(_) => {
-                                debug!("No changes to process");
-                                last_modified_clone.store(0, Ordering::Relaxed);
-                            }
-                            Err(e) => {
-                                warn!("Error in debounce check: {}", e);
-                            }
-                        }
+                // Check if we have any changed files
+                let files_to_reindex: Vec<PathBuf> = {
+                    let mut guard = changed_files_clone.lock().unwrap();
+                    if guard.is_empty() {
+                        Vec::new()
+                    } else {
+                        let files: Vec<PathBuf> = guard.iter().cloned().collect();
+                        guard.clear();
+                        files
                     }
+                };
+                
+                if !files_to_reindex.is_empty() {
+                    debug!("Debounce period elapsed, reindexing {} files", files_to_reindex.len());
+                    let _ = tx.send(files_to_reindex);
                 }
             }
         });
         
-        let mut watcher = RecommendedWatcher::new(
-            move |res: Result<Event, notify::Error>| {
-                match res {
-                    Ok(event) => {
-                        if matches!(event.kind, EventKind::Modify(_)) {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap()
-                                .as_millis() as u64;
-                            
-                            last_modified.store(now, Ordering::Relaxed);
-                            debug!("Git index modified at {}", now);
-                        }
-                    }
-                    Err(e) => warn!("Watch error: {:?}", e),
-                }
-            },
-            Config::default(),
-        )?;
-
-        watcher.watch(&self.git_index_path, RecursiveMode::NonRecursive)?;
-        std::mem::forget(watcher);
+        // Spawn file collector task
+        let changed_files_for_collector = Arc::clone(&changed_files);
+        std::thread::spawn(move || {
+            while let Ok(path) = file_rx.recv() {
+                let mut guard = changed_files_for_collector.lock().unwrap();
+                guard.insert(path.clone());
+                debug!("File queued for reindex: {}", path.display());
+            }
+        });
+        
+        // Start the file watcher
+        let watch_rx = self.watch()?;
+        std::thread::spawn(move || {
+            while let Ok(path) = watch_rx.recv() {
+                let _ = file_tx.send(path);
+            }
+        });
         
         Ok(rx)
     }
@@ -461,7 +495,28 @@ pub struct Config {
 }
 ```
 
-**Test**: Modify multiple files quickly, verify reindex only happens once after debounce period.
+**Test**: Modify multiple files quickly, verify they're batched into one reindex:
+
+```bash
+# Edit 3 files rapidly
+echo "// change 1" >> src/main.rs
+echo "// change 2" >> src/lib.rs  
+echo "// change 3" >> src/utils.rs
+
+# Wait 1+ second (debounce period)
+sleep 2
+
+# Check logs - should show ONE reindex with 3 files, not 3 separate reindexes
+```
+
+**Expected output**:
+```
+[DEBUG] File queued for reindex: src/main.rs
+[DEBUG] File queued for reindex: src/lib.rs
+[DEBUG] File queued for reindex: src/utils.rs
+[DEBUG] Debounce period elapsed, reindexing 3 files
+[INFO] Reindexed 3 files (45 chunks) in 0.8s
+```
 
 ---
 
@@ -796,21 +851,19 @@ Start server and edit files:
 # Terminal 1: Start server
 cargo run -- serve
 
-# Terminal 2: Edit files
+# Terminal 2: Edit files (NO git add needed!)
 echo "// change 1" >> src/main.rs
-git add src/main.rs
 
 # Watch Terminal 1 for automatic reindex logs
 ```
 
 **Expected Output in Terminal 1**:
 ```
-[INFO] Git watcher started (debounce: 1000ms)
+[INFO] File watcher started (debounce: 1000ms)
 [INFO] Server listening on .ragrep/ragrep.sock
-[INFO] Git index modified
-[INFO] Detected 1 changed files, reindexing...
-[INFO]   - src/main.rs
-[INFO] Reindexed 1 files (12 chunks) in 1.24s
+[DEBUG] File queued for reindex: src/main.rs
+[DEBUG] Debounce period elapsed, reindexing 1 files
+[INFO] Reindexed 1 files (12 chunks, reused 0, computed 12) in 0.3s
 [INFO] Reindex complete
 ```
 
@@ -932,10 +985,7 @@ fn test_auto_reindex_function() {
 }
 EOF
 
-# 6. Stage the change (triggers git index update)
-git add src/main.rs
-
-# 7. Wait for debounce + reindex
+# 6. Wait for debounce + reindex (NO git add needed!)
 sleep 3
 
 # 8. Query after changes
@@ -1033,16 +1083,22 @@ debounce_ms = 2000  # Increase to 2 seconds
 
 ### Issue: Changes not detected
 
-**Cause**: Files not staged in git (git index not updated)
+**Cause**: File extension not in watched list or file outside working directory
 
-**Fix**: Remember to `git add` files:
+**Fix**: Check file extension is supported:
 ```bash
-# This triggers reindex ✅
-git add src/main.rs
+# Supported extensions (triggers reindex) ✅
+vim src/main.rs   # .rs
+vim app.py        # .py  
+vim index.js      # .js
+vim app.ts        # .ts
 
-# This does NOT trigger reindex ❌
-vim src/main.rs  # Just saving without git add
+# NOT supported (no reindex) ❌
+vim README.md     # .md not watched
+vim data.json     # .json not watched
 ```
+
+To add more extensions, update the watcher code to include them.
 
 ### Issue: High CPU usage
 
@@ -1123,8 +1179,8 @@ $ ragrep "new code"
 ### After Phase 3
 ```bash
 $ ragrep serve &
-$ vim src/main.rs  # Edit file
-$ git add src/main.rs  # Triggers auto-reindex (2s)
+$ vim src/main.rs  # Edit and save (NO git add!)
+# Auto-reindex happens instantly (0.2-0.8s)
 $ ragrep "new code"
   ✅ Found immediately!
 ```

@@ -1,6 +1,8 @@
 use anyhow::Result;
+use log::debug;
 use rusqlite::{params, Connection};
 use sqlite_vec::sqlite3_vec_init;
+use std::collections::HashMap;
 use std::path::Path;
 use zerocopy::IntoBytes;
 
@@ -138,5 +140,92 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(chunks)
+    }
+
+    /// Get all chunks for a file with their hashes and embeddings (for reuse)
+    pub fn get_chunks_with_embeddings(&self, file_path: &str) -> Result<HashMap<i64, Vec<f32>>> {
+        let mut stmt = self.conn.prepare(
+            r#"
+            SELECT c.hash, v.embedding
+            FROM chunks c
+            JOIN chunks_vec v ON v.rowid = c.id
+            WHERE c.file_path = ?1
+            "#,
+        )?;
+
+        let rows: Vec<(i64, Vec<u8>)> = stmt
+            .query_map([file_path], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let mut cache = HashMap::new();
+        for (hash, embedding_bytes) in rows {
+            // Convert bytes back to f32 array
+            // Each f32 is 4 bytes, so we need to convert in chunks of 4
+            let embedding: Vec<f32> = embedding_bytes
+                .chunks_exact(4)
+                .map(|chunk| {
+                    let bytes: [u8; 4] = [chunk[0], chunk[1], chunk[2], chunk[3]];
+                    f32::from_le_bytes(bytes)
+                })
+                .collect();
+
+            cache.insert(hash, embedding);
+        }
+
+        debug!(
+            "Loaded {} embeddings for reuse from {}",
+            cache.len(),
+            file_path
+        );
+        Ok(cache)
+    }
+
+    /// Delete all chunks for a specific file
+    pub fn delete_file(&mut self, file_path: &str) -> Result<()> {
+        // Get all row IDs for this file first
+        let row_ids: Vec<i64> = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id FROM chunks WHERE file_path = ?1")?;
+            let result = stmt
+                .query_map([file_path], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            result
+        };
+
+        // Now perform deletions in a transaction
+        {
+            let tx = self.conn.transaction()?;
+
+            // Delete from vector table using prepared statement
+            {
+                let mut delete_vec_stmt = tx.prepare("DELETE FROM chunks_vec WHERE rowid = ?1")?;
+                for row_id in &row_ids {
+                    delete_vec_stmt.execute([row_id])?;
+                }
+            }
+
+            // Delete from chunks table
+            {
+                let mut delete_chunks_stmt =
+                    tx.prepare("DELETE FROM chunks WHERE file_path = ?1")?;
+                delete_chunks_stmt.execute([file_path])?;
+            }
+
+            tx.commit()?;
+        }
+
+        debug!("Deleted {} chunks for file: {}", row_ids.len(), file_path);
+
+        Ok(())
+    }
+
+    /// Delete multiple files
+    pub fn delete_files(&mut self, file_paths: &[String]) -> Result<()> {
+        for path in file_paths {
+            self.delete_file(path)?;
+        }
+        Ok(())
     }
 }

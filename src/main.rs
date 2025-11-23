@@ -14,6 +14,7 @@ mod config;
 mod context;
 mod db;
 mod embedder;
+mod git_watcher;
 mod indexer;
 mod protocol;
 mod reranker;
@@ -268,7 +269,7 @@ async fn main() -> Result<()> {
             let context = AppContext::new(&current_dir).await?;
 
             // Create server
-            let server = server::RagrepServer::new(context, &current_dir);
+            let mut server = server::RagrepServer::new(context, &current_dir);
             let pid_path = server.pid_path().clone();
             let socket_path = server.socket_path().clone();
 

@@ -1,10 +1,12 @@
 use crate::context::AppContext;
 use crate::embedder::Embedding;
+use crate::git_watcher::GitIndexWatcher;
 use crate::protocol::{Message, SearchRequest, SearchResponse, SearchResult, SearchStats};
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use log::{debug, error, info, warn};
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -32,7 +34,7 @@ impl RagrepServer {
     }
 
     /// Start the server and listen for connections
-    pub async fn serve(&self) -> Result<()> {
+    pub async fn serve(&mut self) -> Result<()> {
         // Check for existing server
         if let Ok(old_pid_str) = std::fs::read_to_string(&self.pid_path) {
             let pid: u32 = old_pid_str
@@ -52,8 +54,7 @@ impl RagrepServer {
 
         // Write our PID
         let pid = std::process::id();
-        std::fs::write(&self.pid_path, pid.to_string())
-            .context("Failed to write PID file")?;
+        std::fs::write(&self.pid_path, pid.to_string()).context("Failed to write PID file")?;
 
         info!("Server PID: {}", pid);
 
@@ -66,24 +67,132 @@ impl RagrepServer {
         let listener =
             UnixListener::bind(&self.socket_path).context("Failed to bind Unix socket")?;
 
+        // Start git watcher if enabled and in a git repo
+        let git_watcher_rx = self.start_git_watcher().await?;
+
         info!("Server listening on {}", self.socket_path.display());
 
-        // Accept connections in a loop
-        loop {
-            match listener.accept().await {
-                Ok((stream, _addr)) => {
-                    let context = Arc::clone(&self.context);
-
-                    // Spawn a task to handle this connection
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, context).await {
-                            error!("Connection error: {}", e);
+        // Convert blocking receiver to async if watcher exists
+        let mut git_rx_async = if let Some(blocking_rx) = git_watcher_rx {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<PathBuf>>();
+            let tx_clone = tx.clone();
+            // Spawn task to bridge blocking receiver to async channel
+            tokio::spawn(async move {
+                // Run the blocking receiver in a blocking task
+                tokio::task::spawn_blocking(move || {
+                    loop {
+                        match blocking_rx.recv() {
+                            Ok(files) => {
+                                if tx_clone.send(files).is_err() {
+                                    break; // Receiver dropped
+                                }
+                            }
+                            Err(_) => {
+                                break; // Channel closed or error
+                            }
                         }
-                    });
+                    }
+                })
+                .await
+                .ok();
+            });
+            Some(rx)
+        } else {
+            None
+        };
+
+        // Accept connections and handle git changes in a loop
+        loop {
+            tokio::select! {
+                // Handle client connections
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok((stream, _addr)) => {
+                            let context = Arc::clone(&self.context);
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(stream, context).await {
+                                    error!("Connection error: {}", e);
+                                }
+                            });
+                        }
+                        Err(e) => {
+                            error!("Accept error: {}", e);
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Accept error: {}", e);
+
+                // Handle git changes
+                changed_files_result = async {
+                    if let Some(ref mut rx) = git_rx_async {
+                        rx.recv().await
+                    } else {
+                        // Wait forever if no watcher (this branch will never be selected)
+                        std::future::pending::<Option<Vec<PathBuf>>>().await
+                    }
+                } => {
+                    if let Some(changed_files) = changed_files_result {
+                        self.handle_git_changes(changed_files).await;
+                    }
                 }
+            }
+        }
+    }
+
+    async fn start_git_watcher(&self) -> Result<Option<Receiver<Vec<PathBuf>>>> {
+        // Check config
+        let config_enabled = {
+            let context = self.context.lock().await;
+            context.config_manager.config().git_watch.enabled
+        };
+
+        if !config_enabled {
+            info!("Git watching disabled in config");
+            return Ok(None);
+        }
+
+        // Check if in git repo
+        // Get base path from socket path (go up from .ragrep/ragrep.sock)
+        let base_path = self
+            .socket_path
+            .parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| anyhow!("Invalid socket path"))?;
+
+        if !GitIndexWatcher::is_git_repo(base_path) {
+            warn!("Not in a git repository, git watching disabled");
+            return Ok(None);
+        }
+
+        // Start watcher
+        let watcher = GitIndexWatcher::new(base_path)?;
+        let debounce = {
+            let context = self.context.lock().await;
+            context.config_manager.config().git_watch.debounce_ms
+        };
+        let rx = watcher.watch_debounced(debounce)?;
+
+        info!("Git watcher started (debounce: {}ms)", debounce);
+
+        Ok(Some(rx))
+    }
+
+    async fn handle_git_changes(&mut self, changed_files: Vec<PathBuf>) {
+        info!(
+            "Detected {} changed files, reindexing...",
+            changed_files.len()
+        );
+
+        for file in &changed_files {
+            debug!("  - {}", file.display());
+        }
+
+        let mut context = self.context.lock().await;
+        match context.reindex_files(changed_files).await {
+            Ok(()) => {
+                info!("Reindex complete");
+            }
+            Err(e) => {
+                error!("Reindex failed: {}", e);
             }
         }
     }

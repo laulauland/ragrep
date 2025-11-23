@@ -7,6 +7,23 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub model_cache_dir: Option<PathBuf>,
     pub reranker: Option<RerankerConfig>,
+    #[serde(default)]
+    pub git_watch: GitWatchConfig,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct GitWatchConfig {
+    pub enabled: bool,
+    pub debounce_ms: u64,
+}
+
+impl Default for GitWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debounce_ms: 500, // 0.5 second default
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -22,6 +39,7 @@ impl Default for Config {
         Self {
             model_cache_dir: None,
             reranker: None,
+            git_watch: GitWatchConfig::default(),
         }
     }
 }
@@ -29,6 +47,7 @@ impl Default for Config {
 pub struct ConfigManager {
     global_config: Config,
     local_config: Option<Config>,
+    merged_config: Config,
     pub global_config_path: PathBuf,
     pub local_config_path: Option<PathBuf>,
 }
@@ -43,6 +62,11 @@ const DEFAULT_CONFIG: &str = r#"# ragrep configuration file
 # [reranker]
 # use_external_service = true
 # service_url = "http://localhost:8080"
+
+# Optional: Configure git-based auto-reindexing
+# [git_watch]
+# enabled = true
+# debounce_ms = 1000
 "#;
 
 impl ConfigManager {
@@ -69,7 +93,7 @@ impl ConfigManager {
             let local_config_path = workspace_path.join(".ragrep").join("config.toml");
             let local_config = if local_config_path.exists() {
                 let content = fs::read_to_string(&local_config_path)?;
-                Some(toml::from_str(&content).unwrap_or_default())
+                Some(toml::from_str::<Config>(&content).unwrap_or_default())
             } else {
                 None
             };
@@ -78,9 +102,24 @@ impl ConfigManager {
             (None, None)
         };
 
+        // Merge configs: local overrides global
+        let mut merged_config = global_config.clone();
+        if let Some(ref local_config) = local_config {
+            // Merge fields: local takes precedence
+            if local_config.model_cache_dir.is_some() {
+                merged_config.model_cache_dir = local_config.model_cache_dir.clone();
+            }
+            if local_config.reranker.is_some() {
+                merged_config.reranker = local_config.reranker.clone();
+            }
+            // git_watch always uses local if present (since it has defaults)
+            merged_config.git_watch = local_config.git_watch.clone();
+        }
+
         Ok(Self {
             global_config,
             local_config,
+            merged_config,
             global_config_path,
             local_config_path,
         })
@@ -114,5 +153,10 @@ impl ConfigManager {
 
         // Fall back to global config
         self.global_config.reranker.clone()
+    }
+
+    /// Get the merged configuration (local overrides global)
+    pub fn config(&self) -> &Config {
+        &self.merged_config
     }
 }
