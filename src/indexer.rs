@@ -11,6 +11,8 @@ pub struct FileInfo {
     pub modified: SystemTime,
 }
 
+const RAGREP_IGNORE_FILENAME: &str = ".ragrepignore";
+
 pub struct Indexer {
     include_extensions: Vec<String>,
 }
@@ -35,6 +37,7 @@ impl Indexer {
 
         let walker = WalkBuilder::new(&base_path)
             .hidden(false) // Include hidden files/dirs
+            .add_custom_ignore_filename(RAGREP_IGNORE_FILENAME)
             .git_ignore(true) // Use .gitignore
             .git_global(true) // Use global gitignore
             .git_exclude(true) // Use .git/info/exclude

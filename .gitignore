@@ -1,3 +1,6 @@
 /target
 .aider*
-.ragrep/ragrep.db
+.ragrep/ragrep.db*
+.ragrep/*.sock
+.ragrep/*.pid
+.ragrep/*.log

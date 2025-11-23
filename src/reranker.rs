@@ -3,6 +3,7 @@ use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 use log::debug;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 
 pub struct Reranker {
     model: Mutex<TextRerank>,
@@ -10,15 +11,21 @@ pub struct Reranker {
 
 impl Reranker {
     pub fn new(model_cache_dir: &Path) -> Result<Self, Error> {
-        debug!("Initializing reranker model...");
-        // Using Jina Reranker v2 - 278M params, 71.36 MRR@10 on CodeSearchNet
-        // 15x faster than BGE, 2x larger context (1024 tokens), trained for code search
-        let options = RerankInitOptions::new(RerankerModel::JINARerankerV2BaseMultiligual)
+        let start_time = Instant::now();
+        
+        debug!("Initializing BGE reranker model...");
+        // Using BAAI/bge-reranker-base - 278M params, production-grade cross-encoder
+        // Proven performance on semantic search tasks, optimized for retrieval reranking
+        // Default model in fastembed-rs with strong NDCG@10 benchmarks
+        let options = RerankInitOptions::new(RerankerModel::BGERerankerBase)
             .with_cache_dir(model_cache_dir.to_path_buf())
             .with_show_download_progress(true);
 
         let model = TextRerank::try_new(options)?;
+        
+        debug!("[TIMING] Reranker model loading: {:.3}s", start_time.elapsed().as_secs_f64());
         debug!("Reranker model initialized successfully");
+        
         Ok(Self { model: Mutex::new(model) })
     }
 
@@ -41,6 +48,8 @@ impl Reranker {
             return Ok(Vec::new());
         }
 
+        let start_time = Instant::now();
+        
         debug!("Reranking {} documents for query: {}", documents.len(), query);
 
         // Convert documents to &str for the rerank API
@@ -59,6 +68,7 @@ impl Reranker {
         // Sort by score descending (highest relevance first)
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
+        debug!("[TIMING] Reranking: {:.3}s", start_time.elapsed().as_secs_f64());
         debug!(
             "Reranking complete. Top score: {:.4}, Bottom score: {:.4}",
             ranked.first().map(|r| r.1).unwrap_or(0.0),

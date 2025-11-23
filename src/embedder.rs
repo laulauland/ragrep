@@ -1,11 +1,13 @@
 use anyhow::{Error, Result};
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use ignore::Walk;
+use log::debug;
 use promkit::preset::confirm::Confirm;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Instant;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Language, Parser, Query, QueryCursor};
 use tree_sitter_javascript::LANGUAGE as JS_LANGUAGE;
@@ -28,6 +30,8 @@ impl Embedder {
     }
 
     pub fn new(model_cache_dir: &Path) -> Result<Self, Error> {
+        let start_time = Instant::now();
+        
         let mut options = InitOptions::default().with_cache_dir(model_cache_dir.to_path_buf());
         // Using mixedbread-ai/mxbai-embed-large-v1 - 1024 dimensions, MTEB score 64.68
         options.model_name = EmbeddingModel::MxbaiEmbedLargeV1;
@@ -48,6 +52,9 @@ impl Embedder {
         }
 
         let model = TextEmbedding::try_new(options)?;
+        
+        debug!("[TIMING] Embedder model loading: {:.3}s", start_time.elapsed().as_secs_f64());
+        
         Ok(Self {
             model: Mutex::new(model),
             cache: Mutex::new(HashMap::new()),
@@ -83,8 +90,13 @@ impl Embedder {
     }
 
     pub async fn embed_query(&self, query: &str) -> Result<Embedding> {
+        let start_time = Instant::now();
+        
         let mut model = self.model.lock().unwrap();
         let embeddings = model.embed(vec![query], None)?;
+        
+        debug!("[TIMING] Query embedding: {:.3}s", start_time.elapsed().as_secs_f64());
+        
         Ok(Embedding(embeddings[0].clone()))
     }
 

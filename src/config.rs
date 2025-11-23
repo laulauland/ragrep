@@ -3,15 +3,25 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub model_cache_dir: Option<PathBuf>,
+    pub reranker: Option<RerankerConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RerankerConfig {
+    /// Use external reranker service (mxbai-rerank-v2) instead of local JINA reranker
+    pub use_external_service: bool,
+    /// URL of the external reranker service (e.g., "http://localhost:8080")
+    pub service_url: Option<String>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             model_cache_dir: None,
+            reranker: None,
         }
     }
 }
@@ -28,6 +38,11 @@ const DEFAULT_CONFIG: &str = r#"# ragrep configuration file
 
 # Optional: Override the default model cache directory
 # model_cache_dir = "~/.cache/ragrep/models"
+
+# Optional: Configure external reranker service
+# [reranker]
+# use_external_service = true
+# service_url = "http://localhost:8080"
 "#;
 
 impl ConfigManager {
@@ -87,5 +102,17 @@ impl ConfigManager {
         // Default to system data directory
         let data_dir = dirs::data_dir().context("Could not find data directory")?;
         Ok(data_dir.join("ragrep").join("models"))
+    }
+
+    pub fn get_reranker_config(&self) -> Option<RerankerConfig> {
+        // Local config overrides global config
+        if let Some(local_config) = &self.local_config {
+            if let Some(reranker_config) = &local_config.reranker {
+                return Some(reranker_config.clone());
+            }
+        }
+
+        // Fall back to global config
+        self.global_config.reranker.clone()
     }
 }

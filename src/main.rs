@@ -9,21 +9,29 @@ use std::path::PathBuf;
 use termcolor::{Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
 
 mod chunker;
+mod client;
 mod config;
 mod context;
 mod db;
 mod embedder;
 mod indexer;
+mod protocol;
 mod reranker;
+mod server;
 
 use context::AppContext;
 use embedder::Embedding;
+use protocol::{SearchRequest, SearchResponse};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     /// Search query (default command)
     query: Option<String>,
+
+    /// Display only filenames and line numbers without code content
+    #[arg(short = 'l', long = "compact")]
+    files_only: bool,
 
     #[command(subcommand)]
     command: Option<Commands>,
@@ -37,6 +45,8 @@ enum Commands {
         #[arg(short, long)]
         path: Option<String>,
     },
+    /// Start the ragrep server
+    Serve {},
 }
 
 async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
@@ -139,59 +149,60 @@ async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn query_codebase(ctx: &mut AppContext, query: String) -> Result<()> {
-    debug!("Searching for: {}", query);
-
-    // Step 1: Get initial candidates using embedding similarity
-    let Embedding(query_embedding) = ctx.embedder.embed_query(&query).await?;
-    let initial_results = ctx.db.find_similar_chunks(&query_embedding, 50)?; // Get more candidates for reranking
-
-    if initial_results.is_empty() {
-        info!("No similar code found");
-        return Ok(());
-    }
-
-    // Step 2: Rerank results for better relevance
-    debug!("Reranking {} initial results", initial_results.len());
-    let documents: Vec<String> = initial_results.iter().map(|(text, _, _, _, _, _)| text.clone()).collect();
-    let reranked_indices = ctx.reranker.rerank(&query, &documents, Some(10))?;
-
-    // Step 3: Map reranked results back to original data
-    let results: Vec<_> = reranked_indices
-        .iter()
-        .map(|(idx, score)| {
-            let (text, file_path, start_line, end_line, node_type, _distance) = &initial_results[*idx];
-            (text.clone(), file_path.clone(), *start_line, *end_line, node_type.clone(), *score)
-        })
-        .collect();
-
+fn display_search_results(response: &SearchResponse, files_only: bool) -> Result<()> {
     let mut stdout = StandardStream::stdout(ColorChoice::Auto);
 
-    for (text, file_path, start_line, end_line, _node_type, relevance_score) in results {
+    for result in &response.results {
         // Print file path in purple with line range
         stdout.set_color(ColorSpec::new().set_fg(Some(Color::Magenta)).set_bold(true))?;
-        write!(stdout, "{}:", file_path)?;
+        write!(stdout, "{}:", result.file_path)?;
         stdout.set_color(ColorSpec::new().set_fg(Some(Color::Cyan)).set_bold(true))?;
-        writeln!(stdout, "{}:{}", start_line, end_line)?;
+        writeln!(stdout, "{}:{}", result.start_line, result.end_line)?;
         stdout.reset()?;
 
         debug!(
             "Match found in {} (lines {}-{}) with relevance score: {:.4}",
-            file_path,
-            start_line,
-            end_line,
-            relevance_score
+            result.file_path, result.start_line, result.end_line, result.score
         );
 
-        // Print content with line numbers
-        for (i, line) in text.lines().enumerate() {
-            stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)).set_bold(true))?;
-            write!(stdout, "{}:", start_line + i as i32)?;
-            stdout.reset()?;
-            writeln!(stdout, " {}", line)?;
+        // Print content with line numbers only if not in files-only mode
+        if !files_only && !result.text.is_empty() {
+            for (i, line) in result.text.lines().enumerate() {
+                stdout.set_color(ColorSpec::new().set_fg(Some(Color::Green)).set_bold(true))?;
+                write!(stdout, "{}:", result.start_line + i as i32)?;
+                stdout.reset()?;
+                writeln!(stdout, " {}", line)?;
+            }
+            writeln!(stdout)?;
         }
-        writeln!(stdout)?;
     }
+
+    // Print stats
+    info!(
+        "Found {} results in {}ms (from {} candidates)",
+        response.stats.num_results, response.stats.total_time_ms, response.stats.num_candidates
+    );
+
+    Ok(())
+}
+
+async fn query_codebase(ctx: &mut AppContext, query: String, files_only: bool) -> Result<()> {
+    debug!("Searching for: {}", query);
+
+    let request = SearchRequest {
+        query,
+        top_n: 10,
+        files_only,
+    };
+
+    let response = server::execute_search(ctx, request).await?;
+
+    if response.results.is_empty() {
+        info!("No similar code found");
+        return Ok(());
+    }
+
+    display_search_results(&response, files_only)?;
 
     Ok(())
 }
@@ -208,26 +219,88 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let current_dir = std::env::current_dir().context("Failed to get current directory")?;
-    let mut context = AppContext::new(&current_dir).await?;
 
     match (&cli.query, &cli.command) {
         (Some(query), None) => {
-            query_codebase(&mut context, query.clone()).await?;
+            // Try to use server first
+            if client::RagrepClient::is_server_available(&current_dir) {
+                info!("Server detected, using fast mode");
+
+                let client = client::RagrepClient::new(&current_dir)?;
+                info!("Connected to server at {}", client.socket_path().display());
+
+                let request = protocol::SearchRequest {
+                    query: query.clone(),
+                    top_n: 10,
+                    files_only: cli.files_only,
+                };
+
+                match client.search(request).await {
+                    Ok(response) => {
+                        display_search_results(&response, cli.files_only)?;
+                    }
+                    Err(e) => {
+                        warn!("Server query failed: {}, falling back to standalone", e);
+                        warn!("Running in standalone mode (slower, loads models for each query)");
+                        // Fall back to standalone
+                        let mut context = AppContext::new(&current_dir).await?;
+                        query_codebase(&mut context, query.clone(), cli.files_only).await?;
+                    }
+                }
+            } else {
+                // No server found, run standalone
+                warn!("No server detected. Start one with: ragrep serve");
+                info!("Running in standalone mode...");
+                let mut context = AppContext::new(&current_dir).await?;
+                query_codebase(&mut context, query.clone(), cli.files_only).await?;
+            }
         }
         (None, Some(Commands::Index { path })) => {
-            let index_path = path.clone().map(PathBuf::from).unwrap_or(current_dir);
+            let index_path = path
+                .clone()
+                .map(PathBuf::from)
+                .unwrap_or(current_dir.clone());
+            let mut context = AppContext::new(&current_dir).await?;
             index_codebase(&mut context, index_path).await?;
+        }
+        (None, Some(Commands::Serve {})) => {
+            // Create AppContext (loads models)
+            let context = AppContext::new(&current_dir).await?;
+
+            // Create server
+            let server = server::RagrepServer::new(context, &current_dir);
+            let pid_path = server.pid_path().clone();
+            let socket_path = server.socket_path().clone();
+
+            // Handle Ctrl+C gracefully
+            let server_task = tokio::spawn(async move { server.serve().await });
+
+            tokio::select! {
+                result = server_task => {
+                    result??;
+                }
+                _ = tokio::signal::ctrl_c() => {
+                    info!("Received Ctrl+C, shutting down...");
+                }
+            }
+
+            // Clean up PID file and socket
+            let _ = std::fs::remove_file(&pid_path);
+            let _ = std::fs::remove_file(&socket_path);
+            info!("Server stopped");
         }
         (None, None) => {
             info!("No command or query specified. Use --help to see available commands.");
             info!("Example usage:");
             info!("  Index: ragrep index [--path <dir>]");
             info!("  Query: ragrep \"your search term\"");
+            info!("  Server: ragrep serve");
         }
         (Some(_), Some(_)) => {
             warn!("Cannot specify both a query and a command. Use either:");
             info!("  ragrep index [--path <dir>]");
             info!("  ragrep \"your search term\"");
+            info!("  ragrep serve");
         }
     }
 
