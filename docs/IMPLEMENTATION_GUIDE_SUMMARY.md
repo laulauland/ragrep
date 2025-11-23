@@ -40,17 +40,36 @@ Complete tutorial-style implementation guides for building ragrep from scratch.
 
 ---
 
-### 🚧 Phase 3 & 4: In Progress
+### ✅ Phase 3: Git-Based Auto-Reindexing
+**File**: `PHASE3_IMPLEMENTATION_GUIDE.md` (COMPLETE - 1,100+ lines)
+**Goal**: Automatically detect and reindex changed files using git  
+**Time**: 1 week  
+**LOC**: ~300 lines  
+**Difficulty**: Intermediate-Advanced
 
-Due to length constraints, Phase 3 (Git Integration) and Phase 4 (Production Polish) guides will be created separately. The pattern follows the same detailed milestone-based approach as Phases 1 and 2.
+**What You'll Build**:
+- Git change detection using git2
+- File system watching (.git/index monitoring)
+- Debouncing to prevent rapid reindexes
+- Incremental reindexing (only changed files)
+- Server integration with auto-reindex
+- Graceful handling of non-git projects
+
+**7 Milestones with Verifiable Tests**
+
+---
+
+### 🚧 Phase 4: Production Polish
+
+Phase 4 (Production Polish) guide will be created separately. The pattern follows the same detailed milestone-based approach as Phases 1, 2, and 3.
 
 ---
 
 ## 🎯 Learning Path
 
 **Week 1**: Phase 1 - Learn async networking, Unix sockets, process management
-**Week 2**: Phase 2 - Learn MCP protocol, AI tool development
-**Week 3**: Phase 3 - Git integration, incremental updates
+**Week 2**: Phase 3 - Git integration, file watching, incremental updates
+**Week 3**: Phase 2 - Learn MCP protocol, AI tool development (optional)
 **Week 4**: Phase 4 - Production hardening, documentation
 
 ---
@@ -77,7 +96,13 @@ Use this to track completion:
 - [ ] All tests passing
 - [ ] Server/client working
 
-### Phase 2  
+### Phase 3
+- [ ] Read guide
+- [ ] Complete Milestone 1-7
+- [ ] Git watching working
+- [ ] Auto-reindex functional
+
+### Phase 2 (Optional)
 - [ ] Read guide
 - [ ] Complete Milestone 1-7
 - [ ] Claude Desktop connected
@@ -87,4 +112,5 @@ Use this to track completion:
 
 **For the complete guides**, see:
 - `docs/PHASE1_IMPLEMENTATION_GUIDE.md`
-- `docs/PHASE2_IMPLEMENTATION_GUIDE.md`
+- `docs/PHASE3_IMPLEMENTATION_GUIDE.md`
+- `docs/PHASE2_IMPLEMENTATION_GUIDE.md` (optional)

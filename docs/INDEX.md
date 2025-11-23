@@ -1,6 +1,6 @@
 # ragrep Documentation Index
 
-**Total Documentation**: 3,085 lines across multiple comprehensive guides
+**Total Documentation**: 4,200+ lines across multiple comprehensive guides
 
 ## 🗺️ Documentation Map
 
@@ -25,7 +25,14 @@ ragrep/
     │   ├── Client with fallback
     │   └── Process management
     │
-    └── PHASE2_IMPLEMENTATION_GUIDE.md   # MCP Integration (1,353 lines)
+    ├── PHASE3_IMPLEMENTATION_GUIDE.md   # Git Auto-Reindex (1,100+ lines)
+    │   ├── 7 Milestones with verifiable tests
+    │   ├── Git change detection
+    │   ├── File system watching
+    │   ├── Debouncing logic
+    │   └── Incremental reindexing
+    │
+    └── PHASE2_IMPLEMENTATION_GUIDE.md   # MCP Integration (1,353 lines) [OPTIONAL]
         ├── 7 Milestones with verifiable tests
         ├── rust-mcp-sdk integration
         ├── Tool definition
@@ -65,7 +72,10 @@ ragrep/
 **Build the server/client**  
 → Follow `PHASE1_IMPLEMENTATION_GUIDE.md`
 
-**Add MCP support**  
+**Add git auto-reindex**  
+→ Follow `PHASE3_IMPLEMENTATION_GUIDE.md`
+
+**Add MCP support** (optional)  
 → Follow `PHASE2_IMPLEMENTATION_GUIDE.md`
 
 **See a quick overview**  
@@ -83,12 +93,13 @@ ragrep/
 |----------|-------|---------|
 | ARCHITECTURE.md | ~400 | System design & roadmap |
 | PHASE1_IMPLEMENTATION_GUIDE.md | 1,335 | Server/Client tutorial |
-| PHASE2_IMPLEMENTATION_GUIDE.md | 1,353 | MCP integration tutorial |
+| PHASE3_IMPLEMENTATION_GUIDE.md | 1,100+ | Git auto-reindex tutorial |
+| PHASE2_IMPLEMENTATION_GUIDE.md | 1,353 | MCP integration tutorial (optional) |
 | README.md | ~250 | Directory overview |
 | IMPLEMENTATION_GUIDE_SUMMARY.md | ~100 | Quick reference |
 | INDEX.md | (this file) | Navigation |
 
-**Total**: 3,085 lines of comprehensive documentation
+**Total**: 4,200+ lines of comprehensive documentation
 
 ## 🎓 Learning Tracks
 
@@ -100,11 +111,16 @@ ragrep/
 - Complete all milestones
 - Test thoroughly
 
-**Week 2**: Phase 2  
+**Week 2**: Phase 3
 - Continue from Phase 1
-- Follow guide step-by-step
-- Test with Claude
-- Done!
+- Add git auto-reindexing
+- Test file change detection
+- Verify incremental updates
+
+**Week 3** (Optional): Phase 2  
+- Add MCP integration
+- Test with Claude Desktop
+- Enable AI assistant access
 
 ### Track 2: Experienced Developer (Design Focus)
 
@@ -114,12 +130,17 @@ ragrep/
 - Review protocols
 - Plan implementation
 
-**Day 2-3**: Implementation
+**Day 2-3**: Core Implementation
 - Skim Phase 1 guide
 - Implement server/client
 - Reference guide as needed
 
-**Day 4**: MCP Integration
+**Day 4**: Git Integration
+- Skim Phase 3 guide
+- Add auto-reindexing
+- Test file watching
+
+**Day 5** (Optional): MCP
 - Skim Phase 2 guide
 - Add MCP support
 - Test with Claude
@@ -129,8 +150,9 @@ ragrep/
 **30 Minutes**: High-Level Review
 1. Read ARCHITECTURE.md introduction
 2. Skim Phase 1 milestones
-3. Skim Phase 2 milestones
+3. Skim Phase 3 milestones
 4. Review performance expectations
+5. (Optional) Skim Phase 2 for MCP
 
 ## 🔍 Finding Specific Topics
 
@@ -177,9 +199,10 @@ ragrep/
 
 1. Read ARCHITECTURE.md
 2. Complete PHASE1_IMPLEMENTATION_GUIDE.md
-3. Complete PHASE2_IMPLEMENTATION_GUIDE.md
+3. Complete PHASE3_IMPLEMENTATION_GUIDE.md
+4. (Optional) Complete PHASE2_IMPLEMENTATION_GUIDE.md
 
-**Time**: 2 weeks
+**Time**: 2-3 weeks
 
 ### Path D: "I want to contribute"
 
@@ -217,7 +240,12 @@ ragrep/
 - [ ] Client falls back gracefully
 - [ ] All tests passing
 
-### After Phase 2
+### After Phase 3
+- [ ] File changes auto-reindex
+- [ ] Git detection working
+- [ ] Incremental updates fast (2-3s)
+
+### After Phase 2 (Optional)
 - [ ] Claude can search your code
 - [ ] MCP Inspector shows success
 - [ ] Production error handling works
@@ -282,21 +310,24 @@ Find specific topic                 This INDEX.md
 ---
 
 **Total Time Investment**:
-- Reading all docs: ~4 hours
+- Reading all docs: ~5 hours
 - Implementing Phase 1: ~1 week
-- Implementing Phase 2: ~1 week
-- **Total to production**: ~2 weeks
+- Implementing Phase 3: ~1 week
+- (Optional) Implementing Phase 2: ~1 week
+- **Total to production**: ~2-3 weeks
 
 **Total Value**:
 - Working semantic code search tool
-- 10x faster queries
-- AI assistant integration
+- 10x faster queries (server mode)
+- 15x faster reindexing (incremental)
+- Auto-reindex on file changes
+- Optional AI assistant integration
 - Production-ready code
 - Real-world Rust skills
 - Portfolio piece!
 
 ---
 
-Last Updated: November 23, 2025  
-Documentation Version: 1.0  
-Status: Phase 1 & 2 Complete, Phase 3 & 4 Planned
+Last Updated: November 24, 2025  
+Documentation Version: 1.1  
+Status: Phase 1, 2, 3 Complete; Phase 4 Planned
