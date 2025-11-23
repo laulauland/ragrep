@@ -230,14 +230,26 @@ test result: ok. 1 passed; 0 failed
 
 **Design Decision**: We'll watch actual source files (`.rs`, `.py`, etc.) in the working directory, not `.git/index`. This gives instant feedback while still using git to determine which files are relevant.
 
-### Step 2.1: Add Notify Dependency
+**Important**: We respect `.gitignore` and `.ragrepignore` to avoid wasteful reindexing:
+- Skips `node_modules/`, `target/`, `dist/`, `.next/`, `__pycache__/`
+- Prevents thousands of unnecessary file watches
+- Same filtering logic as initial indexing (consistent behavior)
 
-Add file watching library:
+### Step 2.1: Add Dependencies
+
+Add file watching library and gitignore support:
 
 ```bash
 cargo add notify --features "macos_fsevent"
 cargo add tokio --features "sync"
+cargo add ignore  # For .gitignore parsing (same crate used by indexer)
 ```
+
+**Why `ignore` crate?**: We need to respect `.gitignore` to avoid reindexing:
+- `node_modules/` in JavaScript projects (thousands of files!)
+- `target/` in Rust projects (build artifacts)
+- `.next/`, `dist/`, `__pycache__/`, etc.
+- Any custom patterns in `.gitignore` or `.ragrepignore`
 
 ### Step 2.2: Add File Watcher to `git_watcher.rs`
 
@@ -247,11 +259,13 @@ Add to the existing `src/git_watcher.rs`:
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 /// Watches source files in working directory for changes
 pub struct GitFileWatcher {
     detector: GitChangeDetector,
     watch_path: PathBuf,
+    gitignore: Gitignore,
 }
 
 impl GitFileWatcher {
@@ -263,17 +277,57 @@ impl GitFileWatcher {
             .ok_or_else(|| anyhow!("No working directory"))?
             .to_path_buf();
         
+        // Build gitignore matcher
+        let mut builder = GitignoreBuilder::new(&watch_path);
+        
+        // Add .gitignore from repo root
+        let gitignore_path = watch_path.join(".gitignore");
+        if gitignore_path.exists() {
+            builder.add(gitignore_path);
+        }
+        
+        // Add .ragrepignore if exists
+        let ragrepignore_path = watch_path.join(".ragrepignore");
+        if ragrepignore_path.exists() {
+            builder.add(ragrepignore_path);
+        }
+        
+        let gitignore = builder.build()?;
+        
         debug!("Watching source files at: {:?}", watch_path);
         
         Ok(Self {
             detector,
             watch_path,
+            gitignore,
         })
+    }
+
+    /// Check if a path should be ignored
+    fn should_ignore(&self, path: &Path) -> bool {
+        // Check gitignore
+        if self.gitignore.matched(path, path.is_dir()).is_ignore() {
+            return true;
+        }
+        
+        // Always ignore common build/cache directories
+        let components: Vec<_> = path.components().collect();
+        for component in &components {
+            if let Some(name) = component.as_os_str().to_str() {
+                if matches!(name, "node_modules" | "target" | ".git" | "__pycache__" | ".next" | "dist" | "build") {
+                    return true;
+                }
+            }
+        }
+        
+        false
     }
 
     /// Start watching for changes, returns a channel that receives changed file paths
     pub fn watch(&self) -> Result<Receiver<PathBuf>> {
         let (tx, rx) = channel();
+        let gitignore = self.gitignore.clone();
+        let watch_path = self.watch_path.clone();
         
         let mut watcher = RecommendedWatcher::new(
             move |res: Result<Event, notify::Error>| {
@@ -282,6 +336,13 @@ impl GitFileWatcher {
                         // Only care about modify events (file saved)
                         if matches!(event.kind, EventKind::Modify(_)) {
                             for path in event.paths {
+                                // Check if path should be ignored (gitignore, build dirs, etc.)
+                                let relative_path = path.strip_prefix(&watch_path).unwrap_or(&path);
+                                if gitignore.matched(relative_path, path.is_dir()).is_ignore() {
+                                    debug!("Ignoring gitignored file: {}", path.display());
+                                    continue;
+                                }
+                                
                                 // Only process source files (rs, py, js, ts)
                                 if let Some(ext) = path.extension() {
                                     if matches!(ext.to_str(), Some("rs" | "py" | "js" | "ts")) {
@@ -1068,6 +1129,32 @@ git rev-parse --show-toplevel
 git init  # Initialize git
 # OR
 # Accept that git watching will be disabled
+```
+
+### Issue: Files in node_modules/target getting reindexed
+
+**Cause**: File watcher not properly filtering gitignored paths
+
+**Fix**: Ensure gitignore filtering is working:
+```bash
+# Check your .gitignore includes build directories
+cat .gitignore
+
+# Should contain:
+node_modules/
+target/
+dist/
+build/
+__pycache__/
+.next/
+
+# The watcher will automatically skip these!
+```
+
+**Debug**: Check server logs for "Ignoring gitignored file" messages:
+```
+[DEBUG] Ignoring gitignored file: node_modules/pkg/index.js
+[DEBUG] File modified: src/main.rs  ← This one processed
 ```
 
 ### Issue: Reindex triggered constantly
