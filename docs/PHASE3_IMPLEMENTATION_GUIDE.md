@@ -261,6 +261,8 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+const RAGREP_IGNORE_FILENAME: &str = ".ragrepignore";
+
 /// Watches source files in working directory for changes
 pub struct GitFileWatcher {
     detector: GitChangeDetector,
@@ -277,7 +279,7 @@ impl GitFileWatcher {
             .ok_or_else(|| anyhow!("No working directory"))?
             .to_path_buf();
         
-        // Build gitignore matcher
+        // Build gitignore matcher (same approach as indexer for consistency)
         let mut builder = GitignoreBuilder::new(&watch_path);
         
         // Add .gitignore from repo root
@@ -286,8 +288,8 @@ impl GitFileWatcher {
             builder.add(gitignore_path);
         }
         
-        // Add .ragrepignore if exists
-        let ragrepignore_path = watch_path.join(".ragrepignore");
+        // Add .ragrepignore (custom ignore file, same as indexer)
+        let ragrepignore_path = watch_path.join(RAGREP_IGNORE_FILENAME);
         if ragrepignore_path.exists() {
             builder.add(ragrepignore_path);
         }
@@ -295,6 +297,7 @@ impl GitFileWatcher {
         let gitignore = builder.build()?;
         
         debug!("Watching source files at: {:?}", watch_path);
+        debug!("Using .gitignore and {} for filtering", RAGREP_IGNORE_FILENAME);
         
         Ok(Self {
             detector,
@@ -305,12 +308,13 @@ impl GitFileWatcher {
 
     /// Check if a path should be ignored
     fn should_ignore(&self, path: &Path) -> bool {
-        // Check gitignore
+        // Check gitignore (includes .ragrepignore patterns)
         if self.gitignore.matched(path, path.is_dir()).is_ignore() {
             return true;
         }
         
-        // Always ignore common build/cache directories
+        // Always ignore common build/cache directories as fallback
+        // (in case .gitignore is missing)
         let components: Vec<_> = path.components().collect();
         for component in &components {
             if let Some(name) = component.as_os_str().to_str() {
@@ -336,10 +340,10 @@ impl GitFileWatcher {
                         // Only care about modify events (file saved)
                         if matches!(event.kind, EventKind::Modify(_)) {
                             for path in event.paths {
-                                // Check if path should be ignored (gitignore, build dirs, etc.)
+                                // Check if path should be ignored (gitignore, ragrepignore, build dirs, etc.)
                                 let relative_path = path.strip_prefix(&watch_path).unwrap_or(&path);
                                 if gitignore.matched(relative_path, path.is_dir()).is_ignore() {
-                                    debug!("Ignoring gitignored file: {}", path.display());
+                                    debug!("Ignoring file (gitignore/ragrepignore): {}", path.display());
                                     continue;
                                 }
                                 
@@ -799,21 +803,21 @@ echo "// test change" >> src/main.rs
 
 **Why**: The watcher should start with the server and reindex automatically.
 
-### Step 5.1: Update Server to Start Watcher
+### Step 5.1: Update Server to Start File Watcher
 
 Update `src/server.rs`:
 
 ```rust
-use crate::git_watcher::GitIndexWatcher;
+use crate::git_watcher::{GitFileWatcher, GitChangeDetector};
 use std::sync::mpsc::Receiver;
 
 impl RagrepServer {
-    /// Start the server with git watching enabled
+    /// Start the server with file watching enabled
     pub async fn serve(&mut self) -> Result<()> {
         // ... existing PID and socket setup ...
 
-        // Start git watcher if enabled and in a git repo
-        let git_watcher = self.start_git_watcher()?;
+        // Start file watcher if enabled and in a git repo
+        let file_watcher_rx = self.start_file_watcher()?;
         
         info!("Server listening on {}", self.socket_path.display());
         
@@ -837,18 +841,18 @@ impl RagrepServer {
                     }
                 }
                 
-                // Handle git changes
-                Some(changed_files) = git_watcher.as_ref().and_then(|rx| rx.recv().ok()) => {
-                    self.handle_git_changes(changed_files).await;
+                // Handle file changes
+                Some(changed_files) = file_watcher_rx.as_ref().and_then(|rx| rx.recv().ok()) => {
+                    self.handle_file_changes(changed_files).await;
                 }
             }
         }
     }
     
-    fn start_git_watcher(&self) -> Result<Option<Receiver<Vec<PathBuf>>>> {
+    fn start_file_watcher(&self) -> Result<Option<Receiver<Vec<PathBuf>>>> {
         // Check config
         if !self.context.lock().await.config_manager.config.git_watch.enabled {
-            info!("Git watching disabled in config");
+            info!("File watching disabled in config");
             return Ok(None);
         }
         
@@ -857,22 +861,23 @@ impl RagrepServer {
             .and_then(|p| p.parent())
             .ok_or_else(|| anyhow!("Invalid socket path"))?;
         
-        if !GitIndexWatcher::is_git_repo(base_path) {
-            warn!("Not in a git repository, git watching disabled");
+        if !GitChangeDetector::is_git_repo(base_path) {
+            warn!("Not in a git repository, file watching disabled");
             return Ok(None);
         }
         
-        // Start watcher
-        let watcher = GitIndexWatcher::new(base_path)?;
+        // Start file watcher (watches .rs, .py, .js, .ts files)
+        let watcher = GitFileWatcher::new(base_path)?;
         let debounce = self.context.lock().await.config_manager.config.git_watch.debounce_ms;
         let rx = watcher.watch_debounced(debounce)?;
         
-        info!("Git watcher started (debounce: {}ms)", debounce);
+        info!("File watcher started (debounce: {}ms)", debounce);
+        info!("Watching .rs, .py, .js, .ts files (respecting .gitignore)");
         
         Ok(Some(rx))
     }
     
-    async fn handle_git_changes(&mut self, changed_files: Vec<PathBuf>) {
+    async fn handle_file_changes(&mut self, changed_files: Vec<PathBuf>) {
         info!("Detected {} changed files, reindexing...", changed_files.len());
         
         for file in &changed_files {
@@ -921,11 +926,26 @@ echo "// change 1" >> src/main.rs
 **Expected Output in Terminal 1**:
 ```
 [INFO] File watcher started (debounce: 1000ms)
+[INFO] Watching .rs, .py, .js, .ts files (respecting .gitignore)
 [INFO] Server listening on .ragrep/ragrep.sock
 [DEBUG] File queued for reindex: src/main.rs
 [DEBUG] Debounce period elapsed, reindexing 1 files
-[INFO] Reindexed 1 files (12 chunks, reused 0, computed 12) in 0.3s
+[INFO] Detected 1 changed files, reindexing...
+[DEBUG]   - src/main.rs
+[INFO] Reindexed 1 files (12 chunks) in 0.3s - reused 9 embeddings, computed 3 new
 [INFO] Reindex complete
+```
+
+**Test gitignore filtering**:
+```bash
+# Terminal 2: Try editing ignored files
+echo "test" >> node_modules/pkg/index.js
+echo "test" >> target/debug/main.rs
+
+# Terminal 1: Should show these are ignored
+[DEBUG] Ignoring gitignored file: node_modules/pkg/index.js
+[DEBUG] Ignoring gitignored file: target/debug/main.rs
+# No reindex triggered! ✅
 ```
 
 ---
@@ -953,8 +973,8 @@ impl GitChangeDetector {
 The code in Milestone 5 already handles this:
 
 ```rust
-if !GitIndexWatcher::is_git_repo(base_path) {
-    warn!("Not in a git repository, git watching disabled");
+if !GitChangeDetector::is_git_repo(base_path) {
+    warn!("Not in a git repository, file watching disabled");
     return Ok(None);
 }
 ```
@@ -1288,11 +1308,13 @@ After Phase 3, you can:
 
 ## 📝 Configuration Reference
 
+### Server Configuration
+
 Add to `.ragrep/config.toml`:
 
 ```toml
 [git_watch]
-# Enable/disable git-based auto-reindexing
+# Enable/disable file-based auto-reindexing
 enabled = true
 
 # Debounce time in milliseconds
@@ -1300,9 +1322,47 @@ enabled = true
 # Lower = more reindexes but fresher index
 debounce_ms = 1000
 
-# Future: Which git events to watch
-# events = ["modified", "added", "deleted", "renamed"]
+# Future: Which file extensions to watch
+# extensions = ["rs", "py", "js", "ts", "go", "java"]
 ```
+
+### Ignore Configuration
+
+Create `.ragrepignore` in your project root (same format as `.gitignore`):
+
+```
+# .ragrepignore - Files to exclude from ragrep indexing and watching
+
+# Build outputs
+dist/
+build/
+out/
+*.min.js
+*.bundle.js
+
+# Large data files
+*.csv
+*.json
+data/
+
+# Generated code
+generated/
+__generated__/
+*.generated.ts
+
+# Test fixtures
+test/fixtures/
+*.test.data
+
+# Documentation (if you don't want to search docs)
+docs/api/
+```
+
+**Key Points**:
+- `.ragrepignore` is ADDITIONAL to `.gitignore` (both are respected)
+- Uses same syntax as `.gitignore` (glob patterns)
+- Affects both initial indexing AND file watching
+- Useful for excluding large files that are tracked in git but shouldn't be searchable
 
 ---
 
