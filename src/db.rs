@@ -221,11 +221,22 @@ impl Database {
         Ok(())
     }
 
-    /// Delete multiple files
-    pub fn delete_files(&mut self, file_paths: &[String]) -> Result<()> {
-        for path in file_paths {
-            self.delete_file(path)?;
-        }
+    /// Get all indexed file paths
+    pub fn get_indexed_files(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT DISTINCT file_path FROM chunks")?;
+        let files: Vec<String> = stmt
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(files)
+    }
+
+    /// Clear all chunks from the database
+    pub fn clear_all(&mut self) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM chunks_vec", [])?;
+        tx.execute("DELETE FROM chunks", [])?;
+        tx.commit()?;
+        debug!("Cleared all chunks from database");
         Ok(())
     }
 }
