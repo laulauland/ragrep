@@ -46,9 +46,127 @@ enum Commands {
         /// Directory path to index (defaults to current directory)
         #[arg(short, long)]
         path: Option<String>,
+
+        /// Perform full reindex (clear database and reindex all files)
+        #[arg(short, long)]
+        full: bool,
     },
     /// Start the ragrep server
     Serve {},
+}
+
+async fn incremental_index(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
+    info!("Performing incremental index (only new files)");
+    
+    let indexer = indexer::Indexer::new();
+    let mut chunker = chunker::Chunker::new()?;
+    
+    // Get all files in directory
+    let all_files = indexer.index_directory(&path)?;
+    
+    // Get already indexed files
+    let indexed_files: std::collections::HashSet<String> = ctx
+        .db
+        .get_indexed_files()?
+        .into_iter()
+        .collect();
+    
+    // Filter to only new files (not yet indexed)
+    let new_files: Vec<_> = all_files
+        .into_iter()
+        .filter(|f| {
+            let path_str = f.path.to_string_lossy().to_string();
+            !indexed_files.contains(&path_str)
+        })
+        .collect();
+    
+    if new_files.is_empty() {
+        info!("No new files to index");
+        return Ok(());
+    }
+    
+    info!("Found {} new files to index", new_files.len());
+    
+    let total_files = new_files.len();
+    let mut total_chunks = 0;
+    let mut processed_chunks = 0;
+    
+    // Set up progress bars
+    let multi = MultiProgress::new();
+    
+    let files_pb = multi.add(ProgressBar::new(total_files as u64));
+    files_pb.set_style(
+        ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} files ({eta})")
+            .unwrap()
+            .progress_chars("#>-"),
+    );
+    files_pb.set_message("Processing new files");
+    
+    let chunks_pb = multi.add(ProgressBar::new_spinner());
+    chunks_pb.set_style(
+        ProgressStyle::default_spinner()
+            .template("{spinner:.green} [{elapsed_precise}] {msg}")
+            .unwrap(),
+    );
+    chunks_pb.set_message("Processing chunks");
+    
+    for file in new_files {
+        debug!("Processing: {}", file.path.display());
+        files_pb.set_message(format!("Processing {}", file.path.display()));
+        
+        let content = std::fs::read_to_string(&file.path)
+            .with_context(|| format!("Failed to read file: {}", file.path.display()))?;
+        
+        let chunks = chunker.chunk_file(&file.path, &content)?;
+        total_chunks += chunks.len();
+        chunks_pb.set_length(total_chunks as u64);
+        chunks_pb.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} chunks ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        
+        if !chunks.is_empty() {
+            let file_path = file.path.to_string_lossy().to_string();
+            
+            // Process chunks and store in database
+            for (chunk_index, chunk) in chunks.iter().enumerate() {
+                // Generate embedding for the chunk
+                let Embedding(embedding) =
+                    ctx.embedder.embed_text(&chunk.content, &file_path).await?;
+                
+                // Create longer-lived bindings for the values
+                let chunk_idx = chunk_index as i32;
+                
+                // Store chunk and embedding in database
+                ctx.db.save_chunk(
+                    &file_path,
+                    chunk_idx,
+                    &chunk.kind,
+                    chunk.parent_name.as_deref(),
+                    chunk.start_line,
+                    chunk.end_line,
+                    &chunk.content,
+                    chunk.hash(),
+                    &embedding,
+                )?;
+                
+                processed_chunks += 1;
+                chunks_pb.set_position(processed_chunks as u64);
+            }
+        }
+        
+        files_pb.inc(1);
+    }
+    
+    files_pb.finish_with_message("Files processing complete!");
+    chunks_pb.finish_with_message("Chunks processing complete!");
+    
+    info!("Incremental indexing complete! {} chunks processed", processed_chunks);
+    
+    Ok(())
 }
 
 async fn index_codebase(ctx: &mut AppContext, path: PathBuf) -> Result<()> {
@@ -267,13 +385,21 @@ async fn main() -> Result<()> {
                 query_codebase(&mut context, query.clone(), cli.files_only).await?;
             }
         }
-        (None, Some(Commands::Index { path })) => {
+        (None, Some(Commands::Index { path, full })) => {
             let index_path = path
                 .clone()
                 .map(PathBuf::from)
                 .unwrap_or(current_dir.clone());
             let mut context = AppContext::new(&current_dir).await?;
-            index_codebase(&mut context, index_path).await?;
+            
+            if *full {
+                info!("Performing full reindex (clearing database)");
+                context.db.clear_all()?;
+                index_codebase(&mut context, index_path).await?;
+            } else {
+                // Incremental index: only index new files
+                incremental_index(&mut context, index_path).await?;
+            }
         }
         (None, Some(Commands::Serve {})) => {
             // Create AppContext (loads models)
