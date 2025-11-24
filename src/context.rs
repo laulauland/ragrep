@@ -76,8 +76,28 @@ impl AppContext {
         let indexer = Indexer::new();
         let mut chunker = Chunker::new()?;
 
+        // Separate existing files from deleted ones
+        let (existing_files, deleted_files): (Vec<_>, Vec<_>) = file_paths
+            .into_iter()
+            .partition(|path| path.exists());
+
+        // Delete chunks for files that no longer exist
+        for deleted_path in &deleted_files {
+            let file_path_str = deleted_path
+                .canonicalize()
+                .unwrap_or_else(|_| deleted_path.clone())
+                .to_string_lossy()
+                .to_string();
+            debug!("Removing deleted file from index: {}", file_path_str);
+            self.db.delete_file(&file_path_str)?;
+        }
+
+        if !deleted_files.is_empty() {
+            info!("Removed {} deleted files from index", deleted_files.len());
+        }
+
         // Filter to only valid files (exist, correct extensions)
-        let files: Vec<FileInfo> = indexer.index_files(file_paths.into_iter())?;
+        let files: Vec<FileInfo> = indexer.index_files(existing_files.into_iter())?;
 
         if files.is_empty() {
             debug!("No valid files to reindex");

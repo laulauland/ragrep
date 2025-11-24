@@ -249,13 +249,20 @@ pub async fn execute_search(
             .reranker
             .rerank(&request.query, &documents, Some(request.top_n))?;
 
-    // Step 4: Convert to SearchResult format
+    // Step 4: Convert to SearchResult format and filter out non-existent files
     let results: Vec<SearchResult> = reranked_indices
         .iter()
-        .map(|(idx, score)| {
+        .filter_map(|(idx, score)| {
             let (text, file_path, start_line, end_line, _node_type, _distance) =
                 &initial_results[*idx];
-            SearchResult {
+            
+            // Filter out files that no longer exist
+            if !std::path::Path::new(file_path).exists() {
+                debug!("Filtering out non-existent file from results: {}", file_path);
+                return None;
+            }
+            
+            Some(SearchResult {
                 file_path: file_path.clone(),
                 start_line: *start_line,
                 end_line: *end_line,
@@ -265,7 +272,7 @@ pub async fn execute_search(
                     text.clone()
                 },
                 score: *score,
-            }
+            })
         })
         .collect();
 
